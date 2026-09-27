@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  FlatList, Linking, NativeModules, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text,
+  Animated, FlatList, Linking, NativeModules, PanResponder, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text,
   TextInput, useWindowDimensions, View,
 } from 'react-native';
 import { searchTracks, type Track } from './src/core/library';
 import { advanceAfterEnd, createQueue, currentTrackId, moveQueueTrack,
-  nextTrack, playNextInQueue, previousTrack, removeFromQueue, type QueueState } from './src/core/queue';
+  moveQueueTrackTo, nextTrack, playNextInQueue, previousTrack, removeFromQueue,
+  shuffleUpcoming, type QueueState } from './src/core/queue';
+import { discoverTracks, fileType, type DurationFilter, type SortOrder } from './src/core/discovery';
 import { Icon, type IconName } from './src/components/Icon';
 
 const c = {
@@ -43,7 +45,7 @@ type LibraryResponse = { channel: string; channelId: string | null; online: bool
   messageId: number; title: string; artist: string; durationSeconds: number | null;
   fileSize: number; mimeType: string }> };
 type Playlist = { id: string; name: string; trackIds: string[] };
-type CollectionsResponse = { channelId: string; favorites: string[]; playlists: Playlist[];
+type CollectionsResponse = { channelId: string; favorites: string[]; playlists: Playlist[]; recentTrackIds?: string[];
   queue: { trackIds: string[]; currentTrackId: string | null; repeat: QueueState['repeat'] } };
 
 async function bridgeRequest<T>(connection: Bridge, path: string, data?: object): Promise<T> {
@@ -96,9 +98,14 @@ export default function App() {
   const [volume, setVolume] = useState(1);
   const [volumeWidth, setVolumeWidth] = useState(1);
   const endedHandled = useRef(false);
-  const [page, setPage] = useState<'library' | 'favorites' | 'playlists' | 'queue'>('library');
+  const [page, setPage] = useState<'library' | 'favorites' | 'playlists' | 'queue' | 'recent'>('library');
   const [queue, setQueue] = useState(() => createQueue([]));
   const [favorites, setFavorites] = useState<string[]>([]);
+  const [recentTrackIds, setRecentTrackIds] = useState<string[]>([]);
+  const [artistFilter, setArtistFilter] = useState('');
+  const [durationFilter, setDurationFilter] = useState<DurationFilter>('any');
+  const [typeFilter, setTypeFilter] = useState('All types');
+  const [sortOrder, setSortOrder] = useState<SortOrder>('newest');
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [collectionsReady, setCollectionsReady] = useState(false);
   const [collectionError, setCollectionError] = useState('');
@@ -108,14 +115,19 @@ export default function App() {
   const [playlistPickerTrackId, setPlaylistPickerTrackId] = useState<string | null>(null);
   const saveTail = useRef<Promise<unknown>>(Promise.resolve());
   const visible = useMemo(() => searchTracks(tracks, query), [tracks, query]);
+  const types = useMemo(() => ['All types', ...new Set(tracks.map(fileType).sort())], [tracks]);
+  const discovered = useMemo(() => discoverTracks(visible, { artist: artistFilter,
+    duration: durationFilter, type: typeFilter, sort: sortOrder }),
+    [visible, artistFilter, durationFilter, typeFilter, sortOrder]);
   const activePlaylist = playlists.find(item => item.id === activePlaylistId) ?? playlists[0];
   const selected = tracks.find(track => track.id === currentTrackId(queue));
   const playableTracks = useMemo(() => tracks.filter(track => !unavailableTrackIds.has(track.id)),
     [tracks, unavailableTrackIds]);
   const duration = nativeDuration || selected?.durationSeconds || 0;
-  const items = page === 'library' ? visible : page === 'favorites' ?
-    visible.filter(track => favorites.includes(track.id)) :
+  const items = page === 'library' ? discovered : page === 'favorites' ?
+    discovered.filter(track => favorites.includes(track.id)) :
     page === 'playlists' ? (activePlaylist?.trackIds ?? []).map(id => tracks.find(track => track.id === id)!).filter(Boolean) :
+    page === 'recent' ? recentTrackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean) :
     queue.trackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean);
 
   const playTrack = useCallback(async (track: Track) => {
@@ -124,13 +136,14 @@ export default function App() {
     try {
       if (Platform.OS === 'windows') {
         if (!NativeModules.TelopotifyAudio) throw new Error('Windows audio module is unavailable');
-        NativeModules.TelopotifyAudio.play(url);
+        NativeModules.TelopotifyAudio.play(url, track.title, track.artist);
       } else {
         await Linking.openURL(url);
       }
       endedHandled.current = false;
       setPlaybackNotice('');
       setPlayingTrackId(track.id);
+      setRecentTrackIds(current => [track.id, ...current.filter(id => id !== track.id)].slice(0, 50));
       setPaused(false);
       setPlaybackStatus(Platform.OS === 'windows' ? 'opening' : 'playing');
       setPosition(0);
@@ -145,6 +158,12 @@ export default function App() {
     const refresh = () => {
       try {
         const audio = NativeModules.TelopotifyAudio;
+        const command = Number(audio.takeMediaCommand?.() ?? 0);
+        if (command === 1 || command === 2) {
+          const changed = command === 1 ? nextTrack(queue) : previousTrack(queue);
+          const target = tracks.find(track => track.id === currentTrackId(changed));
+          if (target && target.id !== playingTrackId) { setQueue(changed); playTrack(target); return; }
+        }
         const status = String(audio.getStatus());
         if (status === 'ended' && !endedHandled.current) {
           endedHandled.current = true;
@@ -198,6 +217,11 @@ export default function App() {
       setCollectionsReady(false);
       setCollectionError('');
       setFavorites([]);
+      setRecentTrackIds([]);
+      setArtistFilter('');
+      setDurationFilter('any');
+      setTypeFilter('All types');
+      setSortOrder('newest');
       setPlaylists([]);
       setPlaylistPickerTrackId(null);
       setQueue(createQueue(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id)));
@@ -225,6 +249,7 @@ export default function App() {
         const available = new Set(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id));
         const trackIds = saved.queue.trackIds.filter(id => available.has(id));
         setFavorites(saved.favorites);
+        setRecentTrackIds((saved.recentTrackIds ?? []).filter(id => library.some(track => track.id === id)));
         setPlaylists(saved.playlists);
         setActivePlaylistId(saved.playlists[0]?.id ?? '');
         setRenamePlaylistName(saved.playlists[0]?.name ?? '');
@@ -240,7 +265,7 @@ export default function App() {
   useEffect(() => {
     if (!collectionsReady || !bridge || !loadedChannel.current) return;
     const channelId = loadedChannel.current;
-    const snapshot = { channelId, favorites, playlists,
+    const snapshot = { channelId, favorites, playlists, recentTrackIds,
       queue: { trackIds: queue.trackIds, currentTrackId: currentTrackId(queue), repeat: queue.repeat } };
     const timer = setTimeout(() => {
       saveTail.current = saveTail.current.catch(() => {}).then(() =>
@@ -249,7 +274,7 @@ export default function App() {
         'Could not save collections'));
     }, 350);
     return () => clearTimeout(timer);
-  }, [bridge, collectionsReady, favorites, playlists, queue]);
+  }, [bridge, collectionsReady, favorites, playlists, queue, recentTrackIds]);
 
   const loadChannels = useCallback(async (connection: Bridge) => {
     if (channelsFetched.current) return;
@@ -460,13 +485,14 @@ export default function App() {
     setCollectionError('');
   }
 
-  function playSongs(songIds: string[], startId?: string) {
+  function playSongs(songIds: string[], startId?: string, shuffle = false) {
     if (!bridge?.online) return;
     const available = songIds.filter(id => playableTracks.some(track => track.id === id));
-    const first = available.find(id => id === startId) ?? available[0];
+    const ordered = shuffle ? shuffleUpcoming({ ...createQueue(available), currentIndex: -1 }).trackIds : available;
+    const first = ordered.find(id => id === startId) ?? ordered[0];
     const track = playableTracks.find(item => item.id === first);
     if (!track) return;
-    setQueue(current => ({ ...createQueue(available, first), repeat: current.repeat }));
+    setQueue(current => ({ ...createQueue(ordered, first), repeat: current.repeat }));
     playTrack(track);
   }
 
@@ -501,6 +527,7 @@ export default function App() {
       setQueue(createQueue([]));
       setCollectionsReady(false);
       setFavorites([]);
+      setRecentTrackIds([]);
       setPlaylists([]);
       setActivePlaylistId('');
       setCollectionError('');
@@ -573,7 +600,7 @@ export default function App() {
   const currentLabel = online ? 'Ready to stream' : bridge ? 'Telegram offline' :
     connectionStatus.startsWith('Unable') ? 'Connection issue' : 'Connecting';
   const pageTitle = page === 'library' ? 'Your music' : page === 'favorites' ? 'Favorites' :
-    page === 'playlists' ? 'Playlists' : 'Play queue';
+    page === 'playlists' ? 'Playlists' : page === 'recent' ? 'Recently played' : 'Play queue';
 
   return <View style={s.root}>
     <StatusBar barStyle="light-content" backgroundColor={c.bg} />
@@ -586,6 +613,7 @@ export default function App() {
         <Nav icon="favorite" label="Favorites" active={page === 'favorites'} onPress={() => setPage('favorites')} />
         <Nav icon="playlist" label="Playlists" active={page === 'playlists'} onPress={() => setPage('playlists')} />
         <Nav icon="queue" label="Queue" active={page === 'queue'} onPress={() => setPage('queue')} />
+        <Nav icon="recent" label="Recently played" active={page === 'recent'} onPress={() => setPage('recent')} />
         <View style={s.sidebarDivider} />
         <Text style={s.navCaption}>YOUR COLLECTION</Text>
         <View style={s.collectionCard}><View style={s.collectionIcon}><Icon name="music" size={18} /></View>
@@ -606,6 +634,7 @@ export default function App() {
           <Nav icon="favorite" label="Favorites" active={page === 'favorites'} onPress={() => setPage('favorites')} />
           <Nav icon="playlist" label="Playlists" active={page === 'playlists'} onPress={() => setPage('playlists')} />
           <Nav icon="queue" label="Queue" active={page === 'queue'} onPress={() => setPage('queue')} />
+          <Nav icon="recent" label="Recent" active={page === 'recent'} onPress={() => setPage('recent')} />
         </View>}
         <View style={s.topLine}><Text style={s.breadcrumb}>MY MUSIC  /  {page.toUpperCase()}</Text>
           <View style={s.topStatus}><View style={[s.statusDot, !online && s.statusDotIdle]} />
@@ -731,17 +760,22 @@ export default function App() {
             <Text numberOfLines={2} style={s.heroTitle}>{channelName || 'Your music'}</Text>
             <Text style={s.heroMeta}>{tracks.length.toLocaleString()} songs  ·  Stream without downloading your library</Text>
             <Pressable accessibilityRole="button" accessibilityLabel="Play library"
-              disabled={!online || !playableTracks.length} onPress={() => {
-                setQueue(current => ({ ...createQueue(playableTracks.map(track => track.id), playableTracks[0].id), repeat: current.repeat }));
-                playTrack(playableTracks[0]);
+              disabled={!online || !discovered.some(track => !unavailableTrackIds.has(track.id))} onPress={() => {
+                playSongs(discovered.map(track => track.id));
               }}
-              style={[s.heroPlay, (!online || !playableTracks.length) && s.heroPlayDisabled]}><Icon name="play" size={15} color="#1b1730" />
+              style={[s.heroPlay, (!online || !discovered.some(track => !unavailableTrackIds.has(track.id))) && s.heroPlayDisabled]}><Icon name="play" size={15} color="#1b1730" />
               <Text style={s.heroPlayText}>Play collection</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Shuffle library"
+              disabled={!online || !discovered.some(track => !unavailableTrackIds.has(track.id))}
+              onPress={() => playSongs(discovered.map(track => track.id), undefined, true)} style={s.heroShuffle}>
+              <Icon name="shuffle" size={15} color={c.soft} /><Text style={s.syncButtonText}>Shuffle collection</Text>
+            </Pressable>
           </View>{wide && <View style={s.heroArt}><View style={s.heroRecord}><View style={s.heroRecordInner}>
             <Icon name="music" size={28} color={c.soft} /></View></View></View>}
         </View>}
         <View style={[s.toolbar, !wide && s.toolbarCompact]}><View><Text style={s.section}>{page === 'library' ? 'All songs' :
-          page === 'favorites' ? 'Liked songs' : page === 'playlists' ? activePlaylist?.name ?? 'Playlist songs' : 'Up next'}</Text>
+          page === 'favorites' ? 'Liked songs' : page === 'playlists' ? activePlaylist?.name ?? 'Playlist songs' :
+          page === 'recent' ? 'Your latest listens' : 'Up next'}</Text>
           <Text style={s.sectionSub}>{items.length.toLocaleString()} tracks{(page === 'library' || page === 'favorites') && query ? ' found' : ''}{syncError ? ' · Sync will retry when Telegram is available.' : syncMessage ? ` · ${syncMessage}` : ''}</Text></View>
           <View style={[s.toolbarActions, !wide && s.toolbarActionsCompact]}>
             {page === 'library' && <Pressable accessibilityRole="button" accessibilityLabel="Sync new songs"
@@ -749,11 +783,19 @@ export default function App() {
               style={[s.syncButton, (!online || syncBusy || syncing) && s.syncButtonDisabled]}>
               <Icon name="sync" size={15} color={c.soft} /><Text style={s.syncButtonText}>{syncBusy || syncing ? 'Syncing' : 'Sync'}</Text>
             </Pressable>}
-            {(page === 'favorites' || page === 'playlists') && !!items.length && <Pressable
+            {(page === 'favorites' || page === 'playlists' || page === 'recent') && !!items.length && <Pressable
               accessibilityRole="button" accessibilityLabel="Play all shown songs" disabled={!online}
               onPress={() => playSongs(items.map(track => track.id))}
               style={[s.syncButton, !online && s.syncButtonDisabled]}><Icon name="play" size={15} color={c.soft} />
               <Text style={s.syncButtonText}>Play all</Text></Pressable>}
+            {(page === 'favorites' || page === 'playlists' || page === 'recent') && !!items.length && <Pressable
+              accessibilityRole="button" accessibilityLabel="Shuffle shown songs" disabled={!online}
+              onPress={() => playSongs(items.map(track => track.id), undefined, true)}
+              style={[s.syncButton, !online && s.syncButtonDisabled]}><Icon name="shuffle" size={15} color={c.soft} />
+              <Text style={s.syncButtonText}>Shuffle</Text></Pressable>}
+            {page === 'queue' && queue.trackIds.length > 2 && <Pressable accessibilityRole="button"
+              accessibilityLabel="Shuffle upcoming songs" onPress={() => setQueue(current => shuffleUpcoming(current))}
+              style={s.syncButton}><Icon name="shuffle" size={15} color={c.soft} /><Text style={s.syncButtonText}>Shuffle next</Text></Pressable>}
             {page === 'queue' && !!queue.trackIds.length && <Pressable accessibilityRole="button"
               accessibilityLabel="Clear play queue" onPress={clearQueue} style={s.syncButton}>
               <Icon name="remove" size={15} color={c.soft} /><Text style={s.syncButtonText}>Clear queue</Text>
@@ -763,9 +805,21 @@ export default function App() {
               <TextInput accessibilityLabel="Search songs" placeholder="Search songs or artists"
                 placeholderTextColor={c.muted} value={query} onChangeText={setQuery} style={s.searchField} /></View>}
           </View></View>
+        {(page === 'library' || page === 'favorites') && <View style={s.filterBar}>
+          <TextInput accessibilityLabel="Filter by artist" placeholder="Filter artist"
+            placeholderTextColor={c.muted} value={artistFilter} onChangeText={setArtistFilter}
+            style={s.artistFilter} />
+          <FilterChip label={`Duration: ${durationFilter === 'any' ? 'Any' : durationFilter === 'short' ? '< 3 min' :
+            durationFilter === 'medium' ? '3–6 min' : '6+ min'}`} onPress={() => setDurationFilter(current =>
+            ({ any: 'short', short: 'medium', medium: 'long', long: 'any' } as const)[current])} />
+          <FilterChip label={`Type: ${typeFilter}`} onPress={() => setTypeFilter(current =>
+            types[(types.indexOf(current) + 1) % types.length])} />
+          <FilterChip label={`Sort: ${sortOrder}`} onPress={() => setSortOrder(current =>
+            ({ newest: 'title', title: 'artist', artist: 'duration', duration: 'newest' } as const)[current])} />
+        </View>}
         <View style={s.tableHead}><Text style={s.tableNumber}>#</Text><View style={s.tableCover} /><Text style={s.tableTitle}>TITLE</Text>
           {wide && <Text style={s.tableSize}>SIZE</Text>}<Text style={s.tableDuration}>TIME</Text>
-          <View style={s.tableActions} /></View>
+          <View style={[s.tableActions, page === 'queue' && s.tableQueueActions]} /></View>
         <FlatList data={items} keyExtractor={item => item.id}
           renderItem={({ item, index }) => <View
             style={[s.row, selected?.id === item.id && s.selected, unavailableTrackIds.has(item.id) && s.unavailableRow]}>
@@ -776,8 +830,8 @@ export default function App() {
                 if (page === 'queue') {
                   setQueue(current => ({ ...current, currentIndex: current.trackIds.indexOf(item.id) }));
                   playTrack(item);
-                } else playSongs(page === 'library' ? playableTracks.map(track => track.id) :
-                  page === 'favorites' ? items.map(track => track.id) : activePlaylist?.trackIds ?? [], item.id);
+                } else playSongs(page === 'playlists' ? activePlaylist?.trackIds ?? [] :
+                  items.map(track => track.id), item.id);
               }} style={s.rowMain}>
               <Text style={[s.rowNumber, selected?.id === item.id && s.activeRowText]}>{String(index + 1).padStart(2, '0')}</Text>
               <Cover track={item} />
@@ -792,7 +846,7 @@ export default function App() {
               {page !== 'queue' && <RowAction icon={favorites.includes(item.id) ? 'favoriteFilled' : 'favorite'}
                 label={`${favorites.includes(item.id) ? 'Remove' : 'Add'} favorite ${item.title}`}
                 active={favorites.includes(item.id)} onPress={() => toggleFavorite(item.id)} />}
-              {(page === 'library' || page === 'favorites') && <RowAction icon="playlist"
+              {(page === 'library' || page === 'favorites' || page === 'recent') && <RowAction icon="playlist"
                 label={`Add ${item.title} to playlist`} disabled={!collectionsReady}
                 onPress={() => setPlaylistPickerTrackId(item.id)} />}
               {page === 'playlists' && activePlaylist && <RowAction icon="remove"
@@ -800,6 +854,8 @@ export default function App() {
               {page !== 'queue' && <RowAction icon="add" label={`Play ${item.title} next`}
                 disabled={unavailableTrackIds.has(item.id)} onPress={() => setQueue(current => playNextInQueue(current, item.id))} />}
               {page === 'queue' && <>
+                <QueueDragHandle trackId={item.id} index={index} onDrop={destination =>
+                  setQueue(current => moveQueueTrackTo(current, item.id, destination))} />
                 <RowAction icon="up" label={`Move ${item.title} up`} disabled={index === 0}
                   onPress={() => setQueue(current => moveQueueTrack(current, item.id, -1))} />
                 <RowAction icon="down" label={`Move ${item.title} down`} disabled={index === items.length - 1}
@@ -811,12 +867,16 @@ export default function App() {
           </View>}
           ListEmptyComponent={<View style={s.emptyCard}><Icon name="music" size={28} color={c.accent} />
             <Text style={s.emptyTitle}>{query && (page === 'library' || page === 'favorites') ? 'No songs found' :
+              (page === 'library' && tracks.length || page === 'favorites' && favorites.length) ? 'No matching songs' :
               page === 'queue' ? 'Your queue is empty' : page === 'favorites' ? 'No favorites yet' :
-              page === 'playlists' ? 'This playlist is empty' : 'Your songs will appear here'}</Text>
+              page === 'playlists' ? 'This playlist is empty' : page === 'recent' ? 'Nothing played yet' :
+              'Your songs will appear here'}</Text>
             <Text style={s.empty}>{page === 'favorites' ? 'Use the star beside a song to save it here.' :
               page === 'playlists' ? 'Add songs using the playlist icon in your library.' :
               page === 'queue' ? 'Add songs from your library or a playlist.' :
-              query ? 'Try a different title or artist.' : connectionStatus}</Text></View>} />
+              page === 'recent' ? 'Songs you play will show up here.' :
+              (page === 'library' && tracks.length || page === 'favorites' && favorites.length) ?
+                'Try changing the search or filters.' : connectionStatus}</Text></View>} />
       </View>
     </View>
     <View style={[s.playerBar, !wide && s.playerBarCompact]}>
@@ -879,6 +939,31 @@ function RowAction({ icon, label, active = false, disabled = false, onPress }:
     onPress={onPress} style={[s.rowAction, disabled && s.rowActionDisabled]}>
     <Icon name={icon} size={16} color={active ? c.accent : c.muted} />
   </Pressable>;
+}
+
+function FilterChip({ label, onPress }: { label: string; onPress: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={s.filterChip}>
+    <Text numberOfLines={1} style={s.filterText}>{label}</Text>
+  </Pressable>;
+}
+
+function QueueDragHandle({ trackId, index, onDrop }:
+  { trackId: string; index: number; onDrop: (destination: number) => void }) {
+  const offset = useRef(new Animated.Value(0)).current;
+  const responder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderMove: (_, gesture) => offset.setValue(gesture.dy),
+    onPanResponderRelease: (_, gesture) => {
+      offset.setValue(0);
+      onDrop(index + Math.round(gesture.dy / 56));
+    },
+    onPanResponderTerminate: () => offset.setValue(0),
+  }), [index, offset, onDrop]);
+  return <Animated.View {...responder.panHandlers} accessibilityRole="button"
+    accessibilityLabel={`Drag ${trackId} to reorder`} style={[s.dragHandle, { transform: [{ translateY: offset }] }]}>
+    <Icon name="drag" size={17} color={c.muted} />
+  </Animated.View>;
 }
 
 function CacheInfo({ stats, busy, onClear }: { stats: CacheStats; busy: boolean; onClear: () => void }) {
@@ -1015,6 +1100,8 @@ const s = StyleSheet.create({
     backgroundColor: c.accent, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 9 },
   heroPlayDisabled: { opacity: 0.5 },
   heroPlayText: { color: '#1b1730', fontSize: 12, fontWeight: '800' },
+  heroShuffle: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 10,
+    paddingHorizontal: 8, paddingVertical: 5 },
   heroArt: { width: 150, alignItems: 'center', justifyContent: 'center' },
   heroRecord: { width: 126, height: 126, borderRadius: 63, backgroundColor: '#17172c',
     borderWidth: 8, borderColor: '#3d3765', alignItems: 'center', justifyContent: 'center' },
@@ -1034,6 +1121,12 @@ const s = StyleSheet.create({
   section: { color: c.text, fontSize: 18, fontWeight: '800' },
   sectionSub: { color: c.muted, fontSize: 11, marginTop: 2 },
   searchCompact: { flex: 1 },
+  filterBar: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 12 },
+  artistFilter: { color: c.text, backgroundColor: c.raised, borderWidth: 1, borderColor: c.line,
+    borderRadius: 18, width: 165, paddingHorizontal: 11, paddingVertical: 5, fontSize: 11 },
+  filterChip: { backgroundColor: c.raised, borderWidth: 1, borderColor: c.line, borderRadius: 18,
+    paddingHorizontal: 11, paddingVertical: 6, maxWidth: 220 },
+  filterText: { color: c.soft, fontSize: 11, fontWeight: '600' },
   tableHead: { flexDirection: 'row', alignItems: 'center', height: 32, borderBottomWidth: 1, borderBottomColor: c.line, marginBottom: 5 },
   tableNumber: { color: '#7b899f', width: 30, fontSize: 10, paddingLeft: 10 },
   tableCover: { width: 50 },
@@ -1041,9 +1134,11 @@ const s = StyleSheet.create({
   tableSize: { color: '#7b899f', width: 100, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   tableDuration: { color: '#7b899f', width: 52, fontSize: 10, fontWeight: '800', letterSpacing: 1, textAlign: 'right', paddingRight: 9 },
   tableActions: { width: 108 },
+  tableQueueActions: { width: 138 },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 7, paddingHorizontal: 9, borderRadius: 8, marginBottom: 2 },
   rowMain: { flex: 1, flexDirection: 'row', alignItems: 'center', minWidth: 0 },
-  rowActions: { width: 108, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' },
+  rowActions: { minWidth: 108, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' },
+  dragHandle: { width: 30, height: 32, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
   rowAction: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 7 },
   rowActionDisabled: { opacity: 0.35 },
   selected: { backgroundColor: '#27283f' },

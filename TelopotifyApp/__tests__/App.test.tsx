@@ -85,6 +85,19 @@ test('connects automatically to the local bridge and loads a selected channel', 
     await ReactTestRenderer.act(async () => {
       await renderer.root.findByProps({ accessibilityLabel: 'Play Song' }).props.onPress();
     });
+    expect(NativeModules.TelopotifyAudio.play).toHaveBeenCalledWith(
+      expect.stringContaining('/audio/7?'), 'Song', 'Artist');
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Recent' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Library' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Duration: Any' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Duration: < 3 min' })).toBeTruthy();
     const pause = renderer.root.findByProps({ accessibilityLabel: 'Pause selected song' });
     expect(pause.findByType(Icon).props.name).toBe('pause');
     await ReactTestRenderer.act(async () => { await pause.props.onPress(); });
@@ -142,6 +155,7 @@ test('connects automatically to the local bridge and loads a selected channel', 
       await new Promise<void>(resolve => setTimeout(resolve, 500));
     });
     expect(savedCollections.favorites).toContain('7');
+    expect((savedCollections as typeof savedCollections & { recentTrackIds: string[] }).recentTrackIds).toContain('7');
     expect(savedCollections.playlists).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'Mix', trackIds: ['7'] }),
     ]));
@@ -150,6 +164,10 @@ test('connects automatically to the local bridge and loads a selected channel', 
     await ReactTestRenderer.act(async () => { renderer = ReactTestRenderer.create(<App />); });
     await ReactTestRenderer.act(async () => {
       renderer.root.findByProps({ accessibilityLabel: 'Favorites' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Recent' }).props.onPress();
     });
     expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
     expect((NativeModules.TelopotifyAudio.play as jest.Mock).mock.calls.length).toBe(playCalls);

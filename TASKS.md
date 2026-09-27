@@ -64,14 +64,14 @@ Done when: playback starts before a complete song download, seeking works, and s
 Done when: the user can find and play music comfortably at desktop and phone sizes.
 
 ### T07 — Add queue, favorites, and playlists
-- [ ] Implement next/previous, queue editing, shuffle, and repeat. Next/previous, repeat off/all/one, Play next, and queue move/remove/clear are implemented; shuffle remains.
+- [x] Implement next/previous, queue editing, shuffle, and repeat. Queue rows support drag reordering and accessible move buttons; Shuffle next preserves the current track.
 - [x] Add favorites and create/edit/delete local playlists.
 - [x] Persist user collections per channel and restore the previous queue without unexpected autoplay. Data stays in ignored local storage and is removed on sign-out.
 
 Done when: collections survive restarts and queue behavior remains predictable when tracks become unavailable.
 
 ### T08 — Integrate operating-system playback controls
-- [ ] Add Windows media keys, system playback information, and a defined minimize/close behavior.
+- [ ] Add Windows media keys, system playback information, and a defined minimize/close behavior. Native MediaPlayer metadata and next/previous command handling now build; live media-key/minimize verification and close behavior remain.
 - [ ] Add iPhone background audio, lock-screen controls, and interruption/headphone-disconnection handling.
 - [ ] Verify that background streaming continues fetching upcoming audio, not merely playing already buffered bytes.
 

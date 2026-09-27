@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { trackFromAudio, mergeTracks, searchTracks } from './library.ts';
 import { addToQueue, advanceAfterEnd, createQueue, currentTrackId, moveQueueTrack, nextTrack,
-  playNextInQueue, previousTrack, removeFromQueue } from './queue.ts';
+  moveQueueTrackTo, playNextInQueue, previousTrack, removeFromQueue, shuffleUpcoming } from './queue.ts';
+import { discoverTracks, fileType } from './discovery.ts';
 import { trackFromTdMessage } from './tdlibMessages.ts';
 
 test('normalizes incomplete Telegram metadata and merges a repeated message', () => {
@@ -50,6 +51,29 @@ test('queue editing preserves the selected song while moving and adding tracks',
   assert.deepEqual(next.trackIds, ['a', 'b', 'c']);
   assert.deepEqual(playNextInQueue(next, 'a').trackIds, ['b', 'a', 'c']);
   assert.equal(currentTrackId(playNextInQueue(next, 'a')), 'b');
+});
+
+test('drag and shuffle keep the current song and shuffle only upcoming songs', () => {
+  const queue = createQueue(['a', 'b', 'c', 'd'], 'b');
+  const shuffled = shuffleUpcoming(queue, () => 0);
+  assert.deepEqual(shuffled.trackIds, ['a', 'b', 'd', 'c']);
+  assert.equal(currentTrackId(shuffled), 'b');
+  const moved = moveQueueTrackTo(shuffled, 'd', 0);
+  assert.deepEqual(moved.trackIds, ['d', 'a', 'b', 'c']);
+  assert.equal(currentTrackId(moved), 'b');
+});
+
+test('discovery combines artist, duration, type, and sort', () => {
+  const tracks = [
+    { id: '1', artist: 'A', title: 'Z', durationSeconds: 120, mimeType: 'audio/mpeg', messageId: 1 },
+    { id: '2', artist: 'B', title: 'B', durationSeconds: 400, mimeType: 'audio/flac', messageId: 2 },
+    { id: '3', artist: 'A', title: 'A', durationSeconds: 240, mimeType: 'audio/mpeg', messageId: 3 },
+  ];
+  assert.equal(fileType(tracks[0]), 'MP3');
+  assert.deepEqual(discoverTracks(tracks, { artist: 'a', duration: 'medium', type: 'MP3', sort: 'title' })
+    .map(track => track.id), ['3']);
+  assert.deepEqual(discoverTracks(tracks, { artist: '', duration: 'any', type: 'All types', sort: 'newest' })
+    .map(track => track.id), ['3', '2', '1']);
 });
 
 test('maps TDLib audio and audio document messages without fetching media', () => {

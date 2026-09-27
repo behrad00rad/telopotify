@@ -70,3 +70,25 @@ export function moveQueueTrack(queue: QueueState, trackId: string, direction: -1
   [trackIds[index], trackIds[destination]] = [trackIds[destination], trackIds[index]];
   return { ...queue, trackIds, currentIndex: currentId ? trackIds.indexOf(currentId) : 0 };
 }
+
+export function moveQueueTrackTo(queue: QueueState, trackId: string, destination: number): QueueState {
+  const index = queue.trackIds.indexOf(trackId);
+  if (index < 0 || !Number.isFinite(destination)) return queue;
+  const target = Math.max(0, Math.min(queue.trackIds.length - 1, Math.round(destination)));
+  if (index === target) return queue;
+  const currentId = currentTrackId(queue);
+  const trackIds = [...queue.trackIds];
+  trackIds.splice(index, 1);
+  trackIds.splice(target, 0, trackId);
+  return { ...queue, trackIds, currentIndex: currentId ? trackIds.indexOf(currentId) : 0 };
+}
+
+export function shuffleUpcoming(queue: QueueState, random = Math.random): QueueState {
+  const start = Math.min(queue.trackIds.length, queue.currentIndex + 1);
+  const upcoming = queue.trackIds.slice(start);
+  for (let index = upcoming.length - 1; index > 0; index--) {
+    const other = Math.min(index, Math.floor(random() * (index + 1)));
+    [upcoming[index], upcoming[other]] = [upcoming[other], upcoming[index]];
+  }
+  return { ...queue, trackIds: [...queue.trackIds.slice(0, start), ...upcoming] };
+}

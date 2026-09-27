@@ -1,7 +1,8 @@
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 
 export function emptyCollections() {
-  return { favorites: [], playlists: [], queue: { trackIds: [], currentTrackId: null, repeat: 'off' } };
+  return { favorites: [], playlists: [], recentTrackIds: [],
+    queue: { trackIds: [], currentTrackId: null, repeat: 'off' } };
 }
 
 function ids(value) {
@@ -37,7 +38,9 @@ export function normalizeCollections(value) {
   }
   const trackIds = ids(queue.trackIds);
   const currentTrackId = trackIds.includes(queue.currentTrackId) ? queue.currentTrackId : trackIds[0] ?? null;
-  return { favorites, playlists, queue: { trackIds, currentTrackId, repeat: queue.repeat } };
+  const recentTrackIds = ids(value.recentTrackIds ?? []).slice(0, 50);
+  return { favorites, playlists, recentTrackIds,
+    queue: { trackIds, currentTrackId, repeat: queue.repeat } };
 }
 
 export class CollectionsStore {

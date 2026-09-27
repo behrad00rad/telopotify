@@ -3,7 +3,8 @@ import { Platform, StyleSheet, Text } from 'react-native';
 
 export type IconName = 'music' | 'library' | 'queue' | 'sync' | 'search' |
   'play' | 'pause' | 'previous' | 'next' | 'repeatAll' | 'repeatOne' | 'volume' |
-  'favorite' | 'favoriteFilled' | 'playlist' | 'add' | 'remove' | 'delete' | 'up' | 'down';
+  'favorite' | 'favoriteFilled' | 'playlist' | 'add' | 'remove' | 'delete' | 'up' | 'down' |
+  'shuffle' | 'recent' | 'drag';
 
 // Windows system icon font; no image assets or emoji rendering are involved.
 const windowsGlyphs: Record<IconName, string> = {
@@ -12,6 +13,7 @@ const windowsGlyphs: Record<IconName, string> = {
   repeatAll: '\uE8EE', repeatOne: '\uE8ED', volume: '\uE767',
   favorite: '\uE734', favoriteFilled: '\uE735', playlist: '\uE8FD',
   add: '\uE710', remove: '\uE738', delete: '\uE74D', up: '\uE70E', down: '\uE70D',
+  shuffle: '\uE8B1', recent: '\uE823', drag: '\uE700',
 };
 
 const fallbackGlyphs: Record<IconName, string> = {
@@ -20,6 +22,7 @@ const fallbackGlyphs: Record<IconName, string> = {
   repeatAll: '↻', repeatOne: '↻1', volume: '◁',
   favorite: '☆', favoriteFilled: '★', playlist: '☷', add: '+', remove: '−',
   delete: '×', up: '↑', down: '↓',
+  shuffle: '⇄', recent: '◷', drag: '≡',
 };
 
 export function Icon({ name, size = 18, color = '#f5f7fc' }:

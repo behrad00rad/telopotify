@@ -6,12 +6,13 @@ import { join } from 'node:path';
 import { CollectionsStore, emptyCollections, normalizeCollections } from './collections-store.mjs';
 
 test('normalizes playlists, favorites, and a restorable queue', () => {
-  const result = normalizeCollections({ favorites: ['7', '7', '8'],
+  const result = normalizeCollections({ favorites: ['7', '7', '8'], recentTrackIds: ['8', '7', '8'],
     playlists: [{ id: 'mix-1', name: '  Road trip  ', trackIds: ['8', '7', '8'] }],
     queue: { trackIds: ['7', '8'], currentTrackId: '8', repeat: 'all' } });
   assert.deepEqual(result.favorites, ['7', '8']);
   assert.deepEqual(result.playlists[0], { id: 'mix-1', name: 'Road trip', trackIds: ['8', '7'] });
   assert.equal(result.queue.currentTrackId, '8');
+  assert.deepEqual(result.recentTrackIds, ['8', '7']);
   assert.throws(() => normalizeCollections({ ...result, playlists: [{ id: 'bad', name: '', trackIds: [] }] }),
     /Invalid collections/);
 });

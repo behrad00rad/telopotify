@@ -68,6 +68,8 @@ The bridge keeps recent audio ranges in RAM, capped at 32 MiB by default; it nev
 
 Favorites, named playlists, and the edited play queue are saved per channel in ignored `local-data/collections.json`. Star a song to add it to Favorites, use its playlist icon to add or remove it from a playlist, and use **Play next** to move it after the current song. The Queue view lets you move songs up or down, remove them, or clear the queue. Playlists can be created, renamed, played, and deleted. The previous queue and repeat mode restore after restart without starting playback. **Sign out** removes these local collections along with the session and catalog. This development bridge stores collection metadata locally; it does not sync it to Telegram or across devices.
 
+The library and playlists now have Shuffle actions; **Shuffle next** rearranges only upcoming queue entries, keeping the current song in place. Queue rows have a drag handle alongside the move buttons. Library and Favorites offer artist text filtering, duration and file-type filters, and sorting by newest, title, artist, or duration. Recently played songs are saved per channel (up to 50 entries). Windows media keys and the system playback panel use the native MediaPlayer, including track title and artist and next/previous commands. The native build passes; media-key behavior still needs a live Windows check.
+
 On this machine, the user approved enabling `AllowAllTrustedApps`, and React Native deployed and launched the app successfully. The Visual Studio installer requested a restart, but the build and launch succeeded without one.
 
 ## Import channel metadata without an API ID

@@ -4,6 +4,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Media.Core.h>
 #include <winrt/Windows.Media.Playback.h>
+#include <winrt/Windows.Media.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -17,7 +18,7 @@ namespace winrt::TelopotifyApp {
 REACT_MODULE(TelopotifyAudio)
 struct TelopotifyAudio {
   REACT_METHOD(play)
-  void play(std::string url) noexcept {
+  void play(std::string url, std::string title, std::string artist) noexcept {
     try {
       if (!player) {
         player = Windows::Media::Playback::MediaPlayer();
@@ -27,6 +28,17 @@ struct TelopotifyAudio {
         });
         player.MediaEnded([this](auto const&, auto const&) { ended.store(true); });
         player.Volume(desiredVolume);
+        auto commands = player.CommandManager();
+        commands.NextBehavior().EnablingRule(Windows::Media::Playback::MediaCommandEnablingRule::Always);
+        commands.PreviousBehavior().EnablingRule(Windows::Media::Playback::MediaCommandEnablingRule::Always);
+        commands.NextReceived([this](auto const&, auto const& args) {
+          args.Handled(true);
+          pendingCommand.store(1);
+        });
+        commands.PreviousReceived([this](auto const&, auto const& args) {
+          args.Handled(true);
+          pendingCommand.store(2);
+        });
       }
       {
         std::scoped_lock lock(errorMutex);
@@ -34,7 +46,14 @@ struct TelopotifyAudio {
       }
       ended.store(false);
       auto uri = Windows::Foundation::Uri(to_hstring(url));
-      player.Source(Windows::Media::Core::MediaSource::CreateFromUri(uri));
+      auto item = Windows::Media::Playback::MediaPlaybackItem(
+          Windows::Media::Core::MediaSource::CreateFromUri(uri));
+      auto display = item.GetDisplayProperties();
+      display.Type(Windows::Media::MediaPlaybackType::Music);
+      display.MusicProperties().Title(to_hstring(title));
+      display.MusicProperties().Artist(to_hstring(artist));
+      item.ApplyDisplayProperties(display);
+      player.Source(item);
       player.Play();
     } catch (winrt::hresult_error const& ex) { SetError(to_string(ex.message())); }
     catch (...) { SetError("Could not start playback"); }
@@ -52,7 +71,7 @@ struct TelopotifyAudio {
 
   REACT_METHOD(stop)
   void stop() noexcept {
-    try { ended.store(false); if (player) player.Source(nullptr); } catch (...) {}
+    try { ended.store(false); pendingCommand.store(0); if (player) player.Source(nullptr); } catch (...) {}
   }
 
   REACT_METHOD(setVolume)
@@ -104,6 +123,9 @@ struct TelopotifyAudio {
     catch (...) { return 0; }
   }
 
+  REACT_SYNC_METHOD(takeMediaCommand)
+  int takeMediaCommand() noexcept { return pendingCommand.exchange(0); }
+
  private:
   void SetError(std::string message) noexcept {
     std::scoped_lock lock(errorMutex);
@@ -111,6 +133,7 @@ struct TelopotifyAudio {
   }
   Windows::Media::Playback::MediaPlayer player{nullptr};
   std::atomic<bool> ended{false};
+  std::atomic<int> pendingCommand{0};
   double desiredVolume{1.0};
   std::mutex errorMutex;
   std::string error;
