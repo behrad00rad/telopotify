@@ -41,24 +41,24 @@ Done when: the user can sign in, restart without reauthenticating, and remove th
 ### T04 — Select a channel and index its songs
 - [x] Let the user select an accessible channel in the Windows app through the local development bridge. The bridge listed 58 accessible channels and indexed the selected 1,120-song channel.
 - [ ] Index audio messages incrementally, recording message references and available title, artist, duration, filename, and artwork metadata. New music posts now sync from a saved message cursor; filename and artwork metadata remain.
-- [ ] Handle incomplete metadata, duplicates, removed messages, and access errors.
+- [ ] Handle incomplete metadata, duplicates, removed messages, and access errors. Missing songs are now marked unavailable on a confirmed Telegram lookup and removed from the active queue; broader access-error cases remain.
 - [x] Persist the index locally and sync new posts without re-fetching the whole history. The bridge restores the cached catalog and checks newer messages on restart, every minute, or with the Sync button.
 
 Done when: a channel of roughly 1,000 songs can be browsed after indexing without downloading all audio files.
 
 ### T05 — Build on-demand playback and bounded caching
-- [ ] Implement play/pause, seeking, volume, loading/error states, and retry behavior. Windows play/pause, position display, seeking, volume, end-of-song advance, and native status/error reporting are implemented. The app clears stale playback state when the bridge goes offline; retry UI and deeper interruption testing remain.
+- [ ] Implement play/pause, seeking, volume, loading/error states, and retry behavior. Windows controls and native status/error reporting are implemented. The app clears stale playback state when the bridge goes offline and offers Retry after an error; deeper interruption testing remains.
 - [x] Fetch audio in chunks through the validated Telegram adapter; refresh stale file references once when Telegram reports an expired or invalid reference.
 - [ ] Limit prefetching and cancel unnecessary requests when tracks change.
-- [ ] Enforce a configurable cache limit, protect active playback data, and offer clear-cache controls.
-- [ ] Recover from network loss and Telegram rate limits without aggressive retries.
+- [x] Enforce a configurable in-memory cache limit, prefer active-song ranges during eviction, and offer a clear-cache control. Default is 32 MiB; `TELOPOTIFY_CACHE_MB` accepts 0–256.
+- [ ] Recover from network loss and Telegram rate limits without aggressive retries. The bridge retries transient chunk errors, the app detects bridge disconnection, and playback can be retried manually; live interruption tests remain.
 
 Done when: playback starts before a complete song download, seeking works, and storage remains within the documented cache policy.
 
 ### T06 — Design and implement the music interface
 - [ ] Create the library, search, now-playing view, persistent player controls, and queue view.
 - [ ] Support desktop keyboard/mouse interactions and iPhone touch layouts.
-- [ ] Add accessible labels, focus states, readable contrast, and useful empty/loading/error states.
+- [ ] Add accessible labels, focus states, readable contrast, and useful empty/loading/error states. The Windows layout has had a live visual review and now shows playback interruption, Retry, unavailable songs, and cache usage; keyboard focus polish remains.
 - [ ] Use real indexed metadata, with graceful fallbacks for missing artwork or titles.
 
 Done when: the user can find and play music comfortably at desktop and phone sizes.

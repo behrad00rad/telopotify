@@ -4,7 +4,7 @@ import {
   TextInput, useWindowDimensions, View,
 } from 'react-native';
 import { searchTracks, type Track } from './src/core/library';
-import { advanceAfterEnd, createQueue, currentTrackId, nextTrack, previousTrack } from './src/core/queue';
+import { advanceAfterEnd, createQueue, currentTrackId, nextTrack, previousTrack, removeFromQueue } from './src/core/queue';
 import { Icon, type IconName } from './src/components/Icon';
 
 const c = {
@@ -33,9 +33,12 @@ function Cover({ track, large = false }: { track?: Track; large?: boolean }) {
 type Bridge = { base: string; token: string; online: boolean };
 type BridgeStatus = { authenticated: boolean; online: boolean; step: string; error: string;
   channel: string; trackCount: number; selected: boolean; indexing: boolean;
-  syncing: boolean; catalogRevision: number; lastSyncedAt: string | null; syncError: string };
+  syncing: boolean; catalogRevision: number; lastSyncedAt: string | null; syncError: string;
+  cache: CacheStats; unavailableTrackIds: number[] };
+type CacheStats = { bytes: number; limitBytes: number; chunks: number };
 type ChannelChoice = { index: number; title: string; selected: boolean };
-type LibraryResponse = { channel: string; channelId: string | null; online: boolean; catalogRevision: number; tracks: Array<{
+type LibraryResponse = { channel: string; channelId: string | null; online: boolean; catalogRevision: number;
+  unavailableTrackIds: number[]; tracks: Array<{
   messageId: number; title: string; artist: string; durationSeconds: number | null;
   fileSize: number; mimeType: string }> };
 
@@ -75,6 +78,11 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
+  const [syncError, setSyncError] = useState('');
+  const [cache, setCache] = useState<CacheStats>({ bytes: 0, limitBytes: 32 * 1024 * 1024, chunks: 0 });
+  const [cacheBusy, setCacheBusy] = useState(false);
+  const [unavailableTrackIds, setUnavailableTrackIds] = useState<Set<string>>(() => new Set());
+  const [playbackNotice, setPlaybackNotice] = useState('');
   const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
   const [playbackStatus, setPlaybackStatus] = useState('stopped');
@@ -88,6 +96,8 @@ export default function App() {
   const [queue, setQueue] = useState(() => createQueue([]));
   const visible = useMemo(() => searchTracks(tracks, query), [tracks, query]);
   const selected = tracks.find(track => track.id === currentTrackId(queue));
+  const playableTracks = useMemo(() => tracks.filter(track => !unavailableTrackIds.has(track.id)),
+    [tracks, unavailableTrackIds]);
   const duration = nativeDuration || selected?.durationSeconds || 0;
   const items = page === 'library' ? visible : queue.trackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean);
 
@@ -102,13 +112,14 @@ export default function App() {
         await Linking.openURL(url);
       }
       endedHandled.current = false;
+      setPlaybackNotice('');
       setPlayingTrackId(track.id);
       setPaused(false);
       setPlaybackStatus(Platform.OS === 'windows' ? 'opening' : 'playing');
       setPosition(0);
       setNativeDuration(0);
     } catch (error) {
-      setConnectionStatus(error instanceof Error ? error.message : 'Playback failed');
+      setPlaybackNotice(error instanceof Error ? error.message : 'Playback failed');
     }
   }, [bridge]);
 
@@ -156,19 +167,21 @@ export default function App() {
       fileId: item.messageId, fileSize: item.fileSize, title: item.title,
       artist: item.artist, durationSeconds: item.durationSeconds, mimeType: item.mimeType,
     }));
+    const unavailableIds = new Set((data.unavailableTrackIds ?? []).map(String));
+    setUnavailableTrackIds(unavailableIds);
     setTracks(library);
     if (sameLibrary) {
       setQueue(current => {
-        const available = new Set(library.map(track => track.id));
+        const available = new Set(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id));
         const kept = current.trackIds.filter(id => available.has(id));
         const queued = new Set(kept);
-        const added = library.map(track => track.id).filter(id => !queued.has(id));
+        const added = library.map(track => track.id).filter(id => available.has(id) && !queued.has(id));
         const trackIds = [...kept, ...added];
         const currentId = currentTrackId(current);
         return { ...current, trackIds, currentIndex: Math.max(0, trackIds.indexOf(currentId ?? '')) };
       });
     } else {
-      setQueue(createQueue(library.map(track => track.id)));
+      setQueue(createQueue(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id)));
       if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
       endedHandled.current = false;
       setPlayingTrackId(null);
@@ -206,7 +219,24 @@ export default function App() {
     setAuthStep(data.step);
     setAuthError(data.error);
     setSyncing(data.syncing);
-    if (data.syncError) setSyncMessage('Sync will retry when Telegram is available.');
+    setSyncError(data.syncError || '');
+    if (data.cache) setCache(data.cache);
+    const missing = new Set((data.unavailableTrackIds ?? []).map(String));
+    setUnavailableTrackIds(current => current.size === missing.size &&
+      [...current].every(id => missing.has(id)) ? current : missing);
+    if (missing.size) {
+      setQueue(current => {
+        let next = current;
+        for (const id of current.trackIds) if (missing.has(id)) next = removeFromQueue(next, id);
+        return next;
+      });
+      if (playingTrackId && missing.has(playingTrackId)) {
+        if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
+        setPlayingTrackId(null);
+        setPlaybackStatus('stopped');
+        setPlaybackNotice('This song is no longer available in Telegram. Choose another song.');
+      }
+    }
     if (data.authenticated && !data.selected) await loadChannels(connection);
     if (data.online && (!lastOnline.current || data.catalogRevision !== loadedRevision.current)) {
       await loadLibrary(connection);
@@ -221,12 +251,13 @@ export default function App() {
         setPosition(0);
         setNativeDuration(0);
         setConnectionStatus(data.trackCount ? `${data.trackCount} saved songs · Telegram offline` : 'Telegram offline');
+        setPlaybackNotice('Telegram disconnected. Playback stopped; try again when it reconnects.');
       }
       lastOnline.current = false;
       setBridge(current => current && current.token === connection.token && current.online ?
         { ...current, online: false } : current);
     }
-  }, [loadChannels, loadLibrary]);
+  }, [loadChannels, loadLibrary, playingTrackId]);
 
   const bridgeBase = bridge?.base;
   const bridgeToken = bridge?.token;
@@ -245,6 +276,7 @@ export default function App() {
         setPlaybackStatus('stopped');
         setPosition(0);
         setNativeDuration(0);
+        setPlaybackNotice('The local library stopped. Restart the app to resume streaming.');
         setBridge(null);
         setConnectionStatus('Library service unavailable. Reconnecting…');
       }).finally(() => { refreshing = false; });
@@ -324,6 +356,17 @@ export default function App() {
     } finally { setSyncBusy(false); }
   }
 
+  async function clearCache() {
+    if (!bridge || cacheBusy) return;
+    setCacheBusy(true);
+    try {
+      const result = await bridgeRequest<CacheStats>(bridge, '/cache/clear', {});
+      setCache(result);
+    } catch (error) {
+      setConnectionStatus(error instanceof Error ? error.message : 'Could not clear cache');
+    } finally { setCacheBusy(false); }
+  }
+
   async function signOut() {
     if (!bridge) return;
     try {
@@ -340,6 +383,10 @@ export default function App() {
       loadedCount.current = 0;
       loadedRevision.current = -1;
       setSyncMessage('');
+      setSyncError('');
+      setUnavailableTrackIds(new Set());
+      setCache(current => ({ ...current, bytes: 0, chunks: 0 }));
+      setPlaybackNotice('');
       setAuthenticated(false);
       setAuthStep('phone');
       setAuthValue('');
@@ -414,6 +461,7 @@ export default function App() {
           <View style={s.trackText}><Text numberOfLines={1} style={s.collectionTitle}>{channelName || 'Telegram channel'}</Text>
             <Text style={s.collectionCount}>{tracks.length} songs</Text></View></View>
         <View style={s.sidebarBottom}>
+          {bridge && <CacheInfo stats={cache} busy={cacheBusy} onClear={clearCache} />}
           <View style={s.sidebarDivider} />
           <View style={s.statusRow}><View style={[s.statusDot, !online && s.statusDotIdle]} />
             <Text style={s.statusText}>{currentLabel}</Text></View>
@@ -466,6 +514,15 @@ export default function App() {
           <Pressable accessibilityRole="button" accessibilityLabel="Sign out of Telegram"
             onPress={signOut}><Text style={s.accountAction}>Sign out</Text></Pressable>
         </View>}
+        {!wide && bridge && <View style={s.compactCache}><CacheInfo stats={cache} busy={cacheBusy} onClear={clearCache} /></View>}
+        {!!(playbackNotice || playbackStatus.startsWith('error:')) && <View style={s.playbackAlert}>
+          <View style={s.alertCopy}><Text style={s.alertTitle}>Playback interrupted</Text>
+            <Text style={s.alertDetail}>{playbackNotice || 'Could not stream this song. Check the connection and try again.'}</Text></View>
+          <Pressable accessibilityRole="button" accessibilityLabel="Retry playback" disabled={!online || !selected}
+            onPress={() => selected && playTrack(selected)} style={[s.alertAction, (!online || !selected) && s.syncButtonDisabled]}>
+            <Icon name="sync" size={15} color={c.soft} /><Text style={s.alertActionText}>Retry</Text>
+          </Pressable>
+        </View>}
         {bridge && authenticated && channelOptions && <View style={s.setupPanel}>
           <Text style={s.setupTitle}>Choose a channel</Text>
           <TextInput accessibilityLabel="Search channels" placeholder="Search channels"
@@ -487,17 +544,17 @@ export default function App() {
             <Text numberOfLines={2} style={s.heroTitle}>{channelName || 'Your music'}</Text>
             <Text style={s.heroMeta}>{tracks.length.toLocaleString()} songs  ·  Stream without downloading your library</Text>
             <Pressable accessibilityRole="button" accessibilityLabel="Play library"
-              disabled={!online} onPress={() => {
-                setQueue(current => ({ ...createQueue(tracks.map(track => track.id), tracks[0].id), repeat: current.repeat }));
-                playTrack(tracks[0]);
+              disabled={!online || !playableTracks.length} onPress={() => {
+                setQueue(current => ({ ...createQueue(playableTracks.map(track => track.id), playableTracks[0].id), repeat: current.repeat }));
+                playTrack(playableTracks[0]);
               }}
-              style={[s.heroPlay, !online && s.heroPlayDisabled]}><Icon name="play" size={15} color="#1b1730" />
+              style={[s.heroPlay, (!online || !playableTracks.length) && s.heroPlayDisabled]}><Icon name="play" size={15} color="#1b1730" />
               <Text style={s.heroPlayText}>Play collection</Text></Pressable>
           </View>{wide && <View style={s.heroArt}><View style={s.heroRecord}><View style={s.heroRecordInner}>
             <Icon name="music" size={28} color={c.soft} /></View></View></View>}
         </View>}
         <View style={[s.toolbar, !wide && s.toolbarCompact]}><View><Text style={s.section}>{page === 'library' ? 'All songs' : 'Up next'}</Text>
-          <Text style={s.sectionSub}>{items.length.toLocaleString()} tracks{page === 'library' && query ? ' found' : ''}{syncMessage ? ` · ${syncMessage}` : ''}</Text></View>
+          <Text style={s.sectionSub}>{items.length.toLocaleString()} tracks{page === 'library' && query ? ' found' : ''}{syncError ? ' · Sync will retry when Telegram is available.' : syncMessage ? ` · ${syncMessage}` : ''}</Text></View>
           {page === 'library' && <View style={[s.toolbarActions, !wide && s.toolbarActionsCompact]}>
             <Pressable accessibilityRole="button" accessibilityLabel="Sync new songs"
               disabled={!online || syncBusy || syncing} onPress={syncLibrary}
@@ -512,19 +569,20 @@ export default function App() {
           {wide && <Text style={s.tableSize}>SIZE</Text>}<Text style={s.tableDuration}>TIME</Text></View>
         <FlatList data={items} keyExtractor={item => item.id}
           renderItem={({ item, index }) => <Pressable
-            accessibilityRole="button" accessibilityLabel={`Play ${item.title}`}
+            accessibilityRole="button" accessibilityLabel={unavailableTrackIds.has(item.id) ? `${item.title} unavailable` : `Play ${item.title}`}
+            disabled={unavailableTrackIds.has(item.id)}
             onPress={() => {
               setQueue(current => page === 'library'
-                ? { ...createQueue(tracks.map(track => track.id), item.id), repeat: current.repeat }
+                ? { ...createQueue(playableTracks.map(track => track.id), item.id), repeat: current.repeat }
                 : { ...current, currentIndex: index });
               playTrack(item);
             }}
-            style={[s.row, selected?.id === item.id && s.selected]}>
+            style={[s.row, selected?.id === item.id && s.selected, unavailableTrackIds.has(item.id) && s.unavailableRow]}>
             <Text style={[s.rowNumber, selected?.id === item.id && s.activeRowText]}>{String(index + 1).padStart(2, '0')}</Text>
             <Cover track={item} />
             <View style={s.trackText}>
               <Text numberOfLines={1} style={[s.trackTitle, selected?.id === item.id && s.activeRowText]}>{item.title}</Text>
-              <Text numberOfLines={1} style={s.trackArtist}>{item.artist}</Text>
+              <Text numberOfLines={1} style={s.trackArtist}>{item.artist}{unavailableTrackIds.has(item.id) ? ' · Unavailable' : ''}</Text>
             </View>
             {wide && <Text style={s.rowSize}>{size(item.fileSize)}</Text>}
             <Text style={s.rowDuration}>{item.durationSeconds ? clock(item.durationSeconds) : '—'}</Text>
@@ -575,7 +633,8 @@ export default function App() {
       </View>
       </View>
       {wide && <View style={s.playerRight}>
-        <Text style={s.playerRightLabel}>{playingTrackId === selected?.id ? playbackStatus.toUpperCase() : 'READY TO PLAY'}</Text>
+        <Text style={s.playerRightLabel}>{playbackStatus.startsWith('error:') ? 'PLAYBACK ERROR' :
+          playingTrackId === selected?.id ? playbackStatus.toUpperCase() : 'READY TO PLAY'}</Text>
         <View style={s.volumeRow}><Icon name="volume" size={17} color={c.muted} />
           <Pressable accessibilityRole="adjustable" accessibilityLabel="Volume"
             accessibilityValue={{ min: 0, max: 100, now: Math.round(volume * 100) }}
@@ -584,6 +643,22 @@ export default function App() {
             style={s.volumeTrack}><View style={[s.volumeFill, { width: `${volume * 100}%` }]} /></Pressable>
           <Text style={s.volumeValue}>{Math.round(volume * 100)}%</Text></View></View>}
     </View>
+  </View>;
+}
+
+function CacheInfo({ stats, busy, onClear }: { stats: CacheStats; busy: boolean; onClear: () => void }) {
+  const used = (stats.bytes / 1048576).toFixed(1);
+  const limit = Math.round(stats.limitBytes / 1048576);
+  return <View style={s.cacheCard}>
+    <View style={s.cacheHeader}><Text style={s.cacheTitle}>STREAMING CACHE</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="Clear streaming cache"
+        disabled={busy || !stats.bytes} onPress={onClear}>
+        <Text style={[s.cacheClear, (busy || !stats.bytes) && s.cacheClearDisabled]}>Clear</Text>
+      </Pressable></View>
+    <Text style={s.cacheValue}>{used} MB <Text style={s.cacheLimit}>/ {limit} MB</Text></Text>
+    <View style={s.cacheMeter}><View style={[s.cacheMeterFill,
+      { width: `${stats.limitBytes ? Math.min(100, stats.bytes / stats.limitBytes * 100) : 0}%` }]} /></View>
+    <Text style={s.cacheHint}>Recent audio only · cleared on restart</Text>
   </View>;
 }
 
@@ -610,6 +685,17 @@ const s = StyleSheet.create({
   collectionTitle: { color: c.text, fontSize: 12, fontWeight: '700' },
   collectionCount: { color: c.muted, fontSize: 11, marginTop: 3 },
   sidebarBottom: { marginTop: 'auto' },
+  cacheCard: { backgroundColor: c.raised, borderRadius: 11, padding: 12, borderWidth: 1, borderColor: c.line },
+  compactCache: { marginBottom: 16 },
+  cacheHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  cacheTitle: { color: c.muted, fontSize: 9, fontWeight: '800', letterSpacing: 1.1 },
+  cacheClear: { color: c.soft, fontSize: 11, fontWeight: '700' },
+  cacheClearDisabled: { opacity: 0.45 },
+  cacheValue: { color: c.text, fontSize: 16, fontWeight: '800', marginTop: 8 },
+  cacheLimit: { color: c.muted, fontSize: 11, fontWeight: '500' },
+  cacheMeter: { height: 4, backgroundColor: '#394459', borderRadius: 2, marginTop: 8 },
+  cacheMeterFill: { height: 4, backgroundColor: c.accent, borderRadius: 2 },
+  cacheHint: { color: c.muted, fontSize: 10, marginTop: 7 },
   connection: { color: c.muted, fontSize: 11, lineHeight: 16, marginTop: 6 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12 },
   statusDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#61d9a8' },
@@ -646,6 +732,14 @@ const s = StyleSheet.create({
   accountBadge: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#19372f', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20 },
   accountText: { color: '#82dfb9', fontSize: 11, fontWeight: '700' },
   accountAction: { color: c.muted, fontSize: 11, fontWeight: '600' },
+  playbackAlert: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 12, marginBottom: 15,
+    backgroundColor: '#3a252d', borderColor: '#80525f', borderWidth: 1, borderRadius: 11 },
+  alertCopy: { flex: 1 },
+  alertTitle: { color: '#ffd6db', fontSize: 12, fontWeight: '800' },
+  alertDetail: { color: '#e4b8c2', fontSize: 11, marginTop: 3 },
+  alertAction: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11,
+    paddingVertical: 8, backgroundColor: '#5a3745', borderRadius: 8 },
+  alertActionText: { color: c.soft, fontSize: 11, fontWeight: '700' },
   channelSearch: { backgroundColor: c.raised, borderRadius: 8, color: c.text,
     paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8 },
   channelList: { maxHeight: 180 },
@@ -689,6 +783,7 @@ const s = StyleSheet.create({
   tableDuration: { color: '#7b899f', width: 52, fontSize: 10, fontWeight: '800', letterSpacing: 1, textAlign: 'right', paddingRight: 9 },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 7, paddingHorizontal: 9, borderRadius: 8, marginBottom: 2 },
   selected: { backgroundColor: '#27283f' },
+  unavailableRow: { opacity: 0.45 },
   activeRowText: { color: c.soft },
   rowNumber: { color: c.muted, width: 22, fontSize: 11 },
   cover: { width: 40, height: 40, borderRadius: 7, alignItems: 'center', justifyContent: 'center', marginRight: 10 },

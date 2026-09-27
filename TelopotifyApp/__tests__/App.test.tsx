@@ -25,6 +25,7 @@ test('connects automatically to the local bridge and loads a selected channel', 
   let selected = false;
   let synced = false;
   let revision = 0;
+  let cacheBytes = 1024;
   const originalAudio = NativeModules.TelopotifyAudio;
   NativeModules.TelopotifyAudio = {
     play: jest.fn(), pause: jest.fn(), resume: jest.fn(), stop: jest.fn(),
@@ -39,7 +40,8 @@ test('connects automatically to the local bridge and loads a selected channel', 
       expect(path).toBe('http://127.0.0.1:43127/status?token=testtoken');
       data = { authenticated: true, online: selected,
       step: 'authorized', error: '', channel: selected ? 'My Music' : '', trackCount: selected ? 1 : 0,
-      selected, indexing: false, syncing: false, catalogRevision: revision, lastSyncedAt: null, syncError: '' };
+      selected, indexing: false, syncing: false, catalogRevision: revision, lastSyncedAt: null, syncError: '',
+      cache: { bytes: cacheBytes, limitBytes: 32 * 1048576, chunks: cacheBytes ? 1 : 0 }, unavailableTrackIds: [] };
     }
     else if (path.includes('/channels/select?')) {
       expect(options?.method).toBe('POST');
@@ -52,8 +54,13 @@ test('connects automatically to the local bridge and loads a selected channel', 
       synced = true;
       revision++;
       data = { added: 1, count: 2, busy: false };
+    } else if (path.includes('/cache/clear?')) {
+      expect(options?.method).toBe('POST');
+      cacheBytes = 0;
+      data = { bytes: 0, limitBytes: 32 * 1048576, chunks: 0 };
     } else if (path.includes('/library?')) data = { channel: selected ? 'My Music' : '',
       channelId: selected ? 'channel-1' : null, online: selected, catalogRevision: revision,
+      unavailableTrackIds: [],
       tracks: selected ? [{ messageId: 7, title: 'Song', artist: 'Artist',
         durationSeconds: 120, fileSize: 1000, mimeType: 'audio/mpeg' },
       ...(synced ? [{ messageId: 8, title: 'New Song', artist: 'Artist',
@@ -88,6 +95,10 @@ test('connects automatically to the local bridge and loads a selected channel', 
     });
     expect(renderer.root.findByProps({ accessibilityLabel: 'Play New Song' })).toBeTruthy();
     expect(renderer.root.findByProps({ accessibilityLabel: 'Pause selected song' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      await renderer.root.findByProps({ accessibilityLabel: 'Clear streaming cache' }).props.onPress();
+    });
+    expect(cacheBytes).toBe(0);
   } finally {
     await ReactTestRenderer.act(async () => { renderer?.unmount(); });
     fetchMock.mockRestore();

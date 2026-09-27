@@ -6,6 +6,7 @@ import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseRange } from '../range-stream/range.mjs';
 import { CHUNK_BYTES, fetchTelegramChunk, isStaleFileReference } from './chunks.mjs';
+import { AudioRangeCache, cacheLimitFromEnv } from './audio-cache.mjs';
 import { mergeRecentTracks, parseLibraryCache } from './library-cache.mjs';
 import { createAuthFlow } from './auth-flow.mjs';
 import { readSession, removeSession, saveSession } from './session-store.mjs';
@@ -23,6 +24,7 @@ const SYNC_BATCH = 100;
 const SYNC_INTERVAL_MS = 60_000;
 const BRIDGE_PORT = 43127;
 const token = randomBytes(24).toString('hex');
+const audioCache = new AudioRangeCache(cacheLimitFromEnv(process.env.TELOPOTIFY_CACHE_MB));
 
 let client = null;
 let authFlow = null;
@@ -34,6 +36,7 @@ let selectedChannelId = null;
 let channel = '';
 let tracks = [];
 let messages = new Map();
+let unavailable = new Set();
 let indexing = false;
 let syncing = false;
 let lastSyncedMessageId = 0;
@@ -135,6 +138,8 @@ async function selectChannel(index) {
     channel = nextChannel;
     tracks = nextTracks;
     messages = nextMessages;
+    unavailable = new Set();
+    audioCache.clear();
     lastSyncedMessageId = cursor;
     catalogRevision++;
     lastSyncedAt = new Date().toISOString();
@@ -173,6 +178,7 @@ async function syncSelectedChannel() {
       tracks = nextTracks;
       lastSyncedMessageId = nextCursor;
       for (const [id, message] of incomingMessages) messages.set(id, message);
+      for (const id of incomingMessages.keys()) unavailable.delete(id);
       if (incoming.length) catalogRevision++;
     }
     lastSyncedAt = new Date().toISOString();
@@ -256,12 +262,18 @@ async function restoreSession() {
 function status() {
   const flow = authFlow?.state();
   return {
-    authenticated, online: Boolean(authenticated && selectedDialog),
+    authenticated, online: Boolean(authenticated && selectedDialog && client?.connected),
     step: initializing || reconnecting ? 'connecting' : authenticated ? 'authorized' : flow?.step ?? 'phone',
     error: flow?.error ?? '', channel, trackCount: tracks.length,
     selected: Boolean(selectedDialog), indexing, syncing, catalogRevision,
-    lastSyncedAt, syncError,
+    lastSyncedAt, syncError, cache: audioCache.stats(), unavailableTrackIds: [...unavailable],
   };
+}
+
+function markUnavailable(id) {
+  unavailable.add(id);
+  messages.delete(id);
+  audioCache.deleteSong(`${selectedChannelId}:${id}`);
 }
 
 async function logout() {
@@ -281,6 +293,8 @@ async function logout() {
   channel = '';
   tracks = [];
   messages = new Map();
+  unavailable = new Set();
+  audioCache.clear();
   lastSyncedMessageId = 0;
   catalogRevision++;
   lastSyncedAt = null;
@@ -348,10 +362,19 @@ async function handle(request, response) {
     }
     if (url.pathname === '/library' && request.method === 'GET') {
       return json(response, 200, { channel, channelId: selectedChannelId, tracks,
-        catalogRevision, online: Boolean(authenticated && selectedDialog) });
+        catalogRevision, online: Boolean(authenticated && selectedDialog && client?.connected),
+        unavailableTrackIds: [...unavailable] });
     }
     if (url.pathname === '/library/sync' && request.method === 'POST') {
       return json(response, 200, await syncSelectedChannel());
+    }
+    if (url.pathname === '/cache' && request.method === 'GET') {
+      return json(response, 200, audioCache.stats());
+    }
+    if (url.pathname === '/cache/clear' && request.method === 'POST') {
+      await bodyOf(request);
+      audioCache.clear();
+      return json(response, 200, audioCache.stats());
     }
     const match = /^\/audio\/(\d+)$/.exec(url.pathname);
     if (!match) return json(response, 404, { error: 'Not found' });
@@ -364,10 +387,14 @@ async function handle(request, response) {
     const id = Number(match[1]);
     const track = tracks.find(item => item.messageId === id);
     if (!track) return json(response, 404, { error: 'Song not found' });
+    if (unavailable.has(id)) return json(response, 404, { error: 'Song is no longer available' });
     let message = messages.get(id);
     if (!message) {
       message = (await client.getMessages(selectedDialog.inputEntity, { ids: id }))[0];
-      if (!message || !songFromMessage(message)) return json(response, 404, { error: 'Song is no longer available' });
+      if (!message || !songFromMessage(message)) {
+        markUnavailable(id);
+        return json(response, 404, { error: 'Song is no longer available' });
+      }
       messages.set(id, message);
     }
     const parsed = parseRange(request.headers.range, track.fileSize);
@@ -388,6 +415,12 @@ async function handle(request, response) {
       response.writeHead(206, headers);
       return response.end();
     }
+    const cacheKey = `${selectedChannelId}:${id}`;
+    const cached = audioCache.get(cacheKey, parsed.start, length);
+    if (cached) {
+      response.writeHead(206, { ...headers, 'X-Telopotify-Cache': 'hit' });
+      return response.end(cached);
+    }
     const abort = new AbortController();
     response.on('close', () => abort.abort());
     let chunk;
@@ -396,12 +429,16 @@ async function handle(request, response) {
     } catch (error) {
       if (!isStaleFileReference(error) || abort.signal.aborted) throw error;
       const fresh = (await client.getMessages(selectedDialog.inputEntity, { ids: id }))[0];
-      if (!fresh || !songFromMessage(fresh)) return json(response, 404, { error: 'Song is no longer available' });
+      if (!fresh || !songFromMessage(fresh)) {
+        markUnavailable(id);
+        return json(response, 404, { error: 'Song is no longer available' });
+      }
       messages.set(id, fresh);
       chunk = await fetchTelegramChunk(client, fresh, parsed.start, length, abort.signal);
     }
     if (response.destroyed) return;
-    response.writeHead(206, headers);
+    audioCache.put(cacheKey, parsed.start, chunk);
+    response.writeHead(206, { ...headers, 'X-Telopotify-Cache': 'miss' });
     response.end(chunk);
   } catch (error) {
     if (!response.headersSent && !response.destroyed) {
