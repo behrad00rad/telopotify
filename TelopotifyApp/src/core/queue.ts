@@ -46,3 +46,27 @@ export function removeFromQueue(queue: QueueState, trackId: string): QueueState 
     Math.min(queue.currentIndex, trackIds.length - 1);
   return { ...queue, trackIds, currentIndex };
 }
+
+export function addToQueue(queue: QueueState, trackId: string): QueueState {
+  return queue.trackIds.includes(trackId) ? queue :
+    { ...queue, trackIds: [...queue.trackIds, trackId] };
+}
+
+export function playNextInQueue(queue: QueueState, trackId: string): QueueState {
+  const currentId = currentTrackId(queue);
+  if (currentId === trackId) return queue;
+  const trackIds = queue.trackIds.filter(id => id !== trackId);
+  const nextIndex = currentId ? trackIds.indexOf(currentId) + 1 : 0;
+  trackIds.splice(nextIndex, 0, trackId);
+  return { ...queue, trackIds, currentIndex: currentId ? trackIds.indexOf(currentId) : 0 };
+}
+
+export function moveQueueTrack(queue: QueueState, trackId: string, direction: -1 | 1): QueueState {
+  const index = queue.trackIds.indexOf(trackId);
+  const destination = index + direction;
+  if (index < 0 || destination < 0 || destination >= queue.trackIds.length) return queue;
+  const currentId = currentTrackId(queue);
+  const trackIds = [...queue.trackIds];
+  [trackIds[index], trackIds[destination]] = [trackIds[destination], trackIds[index]];
+  return { ...queue, trackIds, currentIndex: currentId ? trackIds.indexOf(currentId) : 0 };
+}

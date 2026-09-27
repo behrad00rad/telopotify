@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { parseRange } from '../range-stream/range.mjs';
 import { CHUNK_BYTES, fetchTelegramChunk, isStaleFileReference } from './chunks.mjs';
 import { AudioRangeCache, cacheLimitFromEnv } from './audio-cache.mjs';
+import { CollectionsStore } from './collections-store.mjs';
 import { mergeRecentTracks, parseLibraryCache } from './library-cache.mjs';
 import { createAuthFlow } from './auth-flow.mjs';
 import { readSession, removeSession, saveSession } from './session-store.mjs';
@@ -19,12 +20,14 @@ const DATA_DIR = resolve('local-data');
 const SESSION_PATH = resolve(DATA_DIR, 'telegram.session');
 const CONNECTION_PATH = resolve(DATA_DIR, 'bridge-connection.json');
 const LIBRARY_CACHE_PATH = resolve(DATA_DIR, 'bridge-library.json');
+const COLLECTIONS_PATH = resolve(DATA_DIR, 'collections.json');
 const MAX_MESSAGES = 2000;
 const SYNC_BATCH = 100;
 const SYNC_INTERVAL_MS = 60_000;
 const BRIDGE_PORT = 43127;
 const token = randomBytes(24).toString('hex');
 const audioCache = new AudioRangeCache(cacheLimitFromEnv(process.env.TELOPOTIFY_CACHE_MB));
+const collectionsStore = new CollectionsStore(COLLECTIONS_PATH);
 
 let client = null;
 let authFlow = null;
@@ -89,14 +92,14 @@ async function saveLibraryCache(nextChannel, nextChannelId, nextTracks, cursor) 
   }
 }
 
-async function bodyOf(request) {
+async function bodyOf(request, maxLength = 4096) {
   if (request.headers['content-type']?.split(';')[0] !== 'application/json') {
     throw new Error('Expected JSON');
   }
   let text = '';
   for await (const part of request) {
     text += part;
-    if (text.length > 4096) throw new Error('Request is too large');
+    if (text.length > maxLength) throw new Error('Request is too large');
   }
   const value = JSON.parse(text);
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected an object');
@@ -306,6 +309,7 @@ async function logout() {
   await Promise.all([
     removeSession(SESSION_PATH),
     unlink(LIBRARY_CACHE_PATH).catch(error => { if (error.code !== 'ENOENT') throw error; }),
+    collectionsStore.clear(),
   ]);
 }
 
@@ -376,6 +380,16 @@ async function handle(request, response) {
       audioCache.clear();
       return json(response, 200, audioCache.stats());
     }
+    if (url.pathname === '/collections' && request.method === 'GET') {
+      if (!selectedChannelId) return json(response, 409, { error: 'Choose a channel first' });
+      return json(response, 200, { channelId: selectedChannelId, ...collectionsStore.get(selectedChannelId) });
+    }
+    if (url.pathname === '/collections' && request.method === 'POST') {
+      if (!selectedChannelId) return json(response, 409, { error: 'Choose a channel first' });
+      const value = await bodyOf(request, 512 * 1024);
+      if (value.channelId !== selectedChannelId) return json(response, 409, { error: 'Channel changed' });
+      return json(response, 200, await collectionsStore.put(selectedChannelId, value));
+    }
     const match = /^\/audio\/(\d+)$/.exec(url.pathname);
     if (!match) return json(response, 404, { error: 'Not found' });
     if (!authenticated || !selectedDialog || !client) {
@@ -443,7 +457,7 @@ async function handle(request, response) {
   } catch (error) {
     if (!response.headersSent && !response.destroyed) {
       const userError = error instanceof SyntaxError ? 'Invalid JSON' : error.message;
-      const statusCode = /Sign in|not active|already|Select|JSON|large|phone number|requested/.test(userError) ? 400 : 502;
+      const statusCode = /Sign in|not active|already|Select|JSON|large|phone number|requested|Invalid collections|Invalid channel/.test(userError) ? 400 : 502;
       json(response, statusCode, { error: userError });
     } else response.destroy();
     if (request.url?.startsWith('/audio/')) console.error(`Audio request failed: ${error.message}`);
@@ -452,6 +466,7 @@ async function handle(request, response) {
 
 async function main() {
   await mkdir(DATA_DIR, { recursive: true });
+  await collectionsStore.load().catch(() => console.warn('Saved collections are unavailable.'));
   const server = createServer(handle);
   await new Promise((done, reject) => {
     server.once('error', reject);

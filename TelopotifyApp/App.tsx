@@ -4,7 +4,8 @@ import {
   TextInput, useWindowDimensions, View,
 } from 'react-native';
 import { searchTracks, type Track } from './src/core/library';
-import { advanceAfterEnd, createQueue, currentTrackId, nextTrack, previousTrack, removeFromQueue } from './src/core/queue';
+import { advanceAfterEnd, createQueue, currentTrackId, moveQueueTrack,
+  nextTrack, playNextInQueue, previousTrack, removeFromQueue, type QueueState } from './src/core/queue';
 import { Icon, type IconName } from './src/components/Icon';
 
 const c = {
@@ -41,6 +42,9 @@ type LibraryResponse = { channel: string; channelId: string | null; online: bool
   unavailableTrackIds: number[]; tracks: Array<{
   messageId: number; title: string; artist: string; durationSeconds: number | null;
   fileSize: number; mimeType: string }> };
+type Playlist = { id: string; name: string; trackIds: string[] };
+type CollectionsResponse = { channelId: string; favorites: string[]; playlists: Playlist[];
+  queue: { trackIds: string[]; currentTrackId: string | null; repeat: QueueState['repeat'] } };
 
 async function bridgeRequest<T>(connection: Bridge, path: string, data?: object): Promise<T> {
   const response = await fetch(`${connection.base}${path}?token=${encodeURIComponent(connection.token)}`, {
@@ -92,14 +96,27 @@ export default function App() {
   const [volume, setVolume] = useState(1);
   const [volumeWidth, setVolumeWidth] = useState(1);
   const endedHandled = useRef(false);
-  const [page, setPage] = useState<'library' | 'queue'>('library');
+  const [page, setPage] = useState<'library' | 'favorites' | 'playlists' | 'queue'>('library');
   const [queue, setQueue] = useState(() => createQueue([]));
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [collectionsReady, setCollectionsReady] = useState(false);
+  const [collectionError, setCollectionError] = useState('');
+  const [activePlaylistId, setActivePlaylistId] = useState('');
+  const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [renamePlaylistName, setRenamePlaylistName] = useState('');
+  const [playlistPickerTrackId, setPlaylistPickerTrackId] = useState<string | null>(null);
+  const saveTail = useRef<Promise<unknown>>(Promise.resolve());
   const visible = useMemo(() => searchTracks(tracks, query), [tracks, query]);
+  const activePlaylist = playlists.find(item => item.id === activePlaylistId) ?? playlists[0];
   const selected = tracks.find(track => track.id === currentTrackId(queue));
   const playableTracks = useMemo(() => tracks.filter(track => !unavailableTrackIds.has(track.id)),
     [tracks, unavailableTrackIds]);
   const duration = nativeDuration || selected?.durationSeconds || 0;
-  const items = page === 'library' ? visible : queue.trackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean);
+  const items = page === 'library' ? visible : page === 'favorites' ?
+    visible.filter(track => favorites.includes(track.id)) :
+    page === 'playlists' ? (activePlaylist?.trackIds ?? []).map(id => tracks.find(track => track.id === id)!).filter(Boolean) :
+    queue.trackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean);
 
   const playTrack = useCallback(async (track: Track) => {
     if (!bridge?.online) return;
@@ -173,14 +190,16 @@ export default function App() {
     if (sameLibrary) {
       setQueue(current => {
         const available = new Set(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id));
-        const kept = current.trackIds.filter(id => available.has(id));
-        const queued = new Set(kept);
-        const added = library.map(track => track.id).filter(id => available.has(id) && !queued.has(id));
-        const trackIds = [...kept, ...added];
+        const trackIds = current.trackIds.filter(id => available.has(id));
         const currentId = currentTrackId(current);
         return { ...current, trackIds, currentIndex: Math.max(0, trackIds.indexOf(currentId ?? '')) };
       });
     } else {
+      setCollectionsReady(false);
+      setCollectionError('');
+      setFavorites([]);
+      setPlaylists([]);
+      setPlaylistPickerTrackId(null);
       setQueue(createQueue(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id)));
       if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
       endedHandled.current = false;
@@ -199,7 +218,38 @@ export default function App() {
     setConnectionStatus(data.online ? sameLibrary && library.length > previousCount ?
       `${library.length - previousCount} new songs added` : `${library.length} songs loaded` :
       library.length ? `${library.length} saved songs · Telegram offline` : 'Sign in and choose a channel');
+    if (!sameLibrary && data.channelId) {
+      try {
+        const saved = await bridgeRequest<CollectionsResponse>(connection, '/collections');
+        if (saved.channelId !== data.channelId) throw new Error('Collections belong to another channel');
+        const available = new Set(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id));
+        const trackIds = saved.queue.trackIds.filter(id => available.has(id));
+        setFavorites(saved.favorites);
+        setPlaylists(saved.playlists);
+        setActivePlaylistId(saved.playlists[0]?.id ?? '');
+        setRenamePlaylistName(saved.playlists[0]?.name ?? '');
+        setQueue({ trackIds, currentIndex: Math.max(0, trackIds.indexOf(saved.queue.currentTrackId ?? '')),
+          repeat: saved.queue.repeat });
+        setCollectionsReady(true);
+      } catch (error) {
+        setCollectionError(error instanceof Error ? error.message : 'Could not load collections');
+      }
+    }
   }, []);
+
+  useEffect(() => {
+    if (!collectionsReady || !bridge || !loadedChannel.current) return;
+    const channelId = loadedChannel.current;
+    const snapshot = { channelId, favorites, playlists,
+      queue: { trackIds: queue.trackIds, currentTrackId: currentTrackId(queue), repeat: queue.repeat } };
+    const timer = setTimeout(() => {
+      saveTail.current = saveTail.current.catch(() => {}).then(() =>
+        bridgeRequest(bridge, '/collections', snapshot));
+      saveTail.current.catch(error => setCollectionError(error instanceof Error ? error.message :
+        'Could not save collections'));
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [bridge, collectionsReady, favorites, playlists, queue]);
 
   const loadChannels = useCallback(async (connection: Bridge) => {
     if (channelsFetched.current) return;
@@ -367,6 +417,78 @@ export default function App() {
     } finally { setCacheBusy(false); }
   }
 
+  function toggleFavorite(trackId: string) {
+    setFavorites(current => current.includes(trackId) ? current.filter(id => id !== trackId) :
+      [...current, trackId]);
+    setCollectionError('');
+  }
+
+  function createPlaylist() {
+    const name = newPlaylistName.trim();
+    if (!name || name.length > 60) { setCollectionError('Use a playlist name up to 60 characters.'); return; }
+    if (playlists.length >= 50) { setCollectionError('You can have up to 50 playlists.'); return; }
+    const id = `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    setPlaylists(current => [...current, { id, name, trackIds: [] }]);
+    setActivePlaylistId(id);
+    setRenamePlaylistName(name);
+    setNewPlaylistName('');
+    setCollectionError('');
+  }
+
+  function renamePlaylist() {
+    if (!activePlaylist) return;
+    const name = renamePlaylistName.trim();
+    if (!name || name.length > 60) { setCollectionError('Use a playlist name up to 60 characters.'); return; }
+    setPlaylists(current => current.map(item => item.id === activePlaylist.id ? { ...item, name } : item));
+    setCollectionError('');
+  }
+
+  function deletePlaylist() {
+    if (!activePlaylist) return;
+    const remaining = playlists.filter(item => item.id !== activePlaylist.id);
+    setPlaylists(remaining);
+    setActivePlaylistId(remaining[0]?.id ?? '');
+    setRenamePlaylistName(remaining[0]?.name ?? '');
+    setCollectionError('');
+  }
+
+  function togglePlaylistTrack(playlistId: string, trackId: string) {
+    setPlaylists(current => current.map(item => item.id !== playlistId ? item : {
+      ...item, trackIds: item.trackIds.includes(trackId) ? item.trackIds.filter(id => id !== trackId) :
+        [...item.trackIds, trackId],
+    }));
+    setCollectionError('');
+  }
+
+  function playSongs(songIds: string[], startId?: string) {
+    if (!bridge?.online) return;
+    const available = songIds.filter(id => playableTracks.some(track => track.id === id));
+    const first = available.find(id => id === startId) ?? available[0];
+    const track = playableTracks.find(item => item.id === first);
+    if (!track) return;
+    setQueue(current => ({ ...createQueue(available, first), repeat: current.repeat }));
+    playTrack(track);
+  }
+
+  function removeQueuedTrack(trackId: string) {
+    if (playingTrackId === trackId) {
+      if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
+      setPlayingTrackId(null);
+      setPaused(false);
+      setPlaybackStatus('stopped');
+      setPosition(0);
+    }
+    setQueue(current => removeFromQueue(current, trackId));
+  }
+
+  function clearQueue() {
+    if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
+    setPlayingTrackId(null);
+    setPlaybackStatus('stopped');
+    setPosition(0);
+    setQueue(current => ({ ...createQueue([]), repeat: current.repeat }));
+  }
+
   async function signOut() {
     if (!bridge) return;
     try {
@@ -377,6 +499,12 @@ export default function App() {
       setBridge({ ...bridge, online: false });
       setTracks([]);
       setQueue(createQueue([]));
+      setCollectionsReady(false);
+      setFavorites([]);
+      setPlaylists([]);
+      setActivePlaylistId('');
+      setCollectionError('');
+      setPlaylistPickerTrackId(null);
       setChannelName('');
       loadedChannel.current = '';
       loadedToken.current = '';
@@ -444,7 +572,8 @@ export default function App() {
     ['opening', 'buffering', 'playing'].includes(playbackStatus);
   const currentLabel = online ? 'Ready to stream' : bridge ? 'Telegram offline' :
     connectionStatus.startsWith('Unable') ? 'Connection issue' : 'Connecting';
-  const pageTitle = page === 'library' ? 'Your music' : 'Play queue';
+  const pageTitle = page === 'library' ? 'Your music' : page === 'favorites' ? 'Favorites' :
+    page === 'playlists' ? 'Playlists' : 'Play queue';
 
   return <View style={s.root}>
     <StatusBar barStyle="light-content" backgroundColor={c.bg} />
@@ -454,6 +583,8 @@ export default function App() {
           <View><Text style={s.brand}>telopotify</Text><Text style={s.brandTag}>TELEGRAM MUSIC</Text></View></View>
         <Text style={s.navCaption}>YOUR SPACE</Text>
         <Nav icon="library" label="Library" active={page === 'library'} onPress={() => setPage('library')} />
+        <Nav icon="favorite" label="Favorites" active={page === 'favorites'} onPress={() => setPage('favorites')} />
+        <Nav icon="playlist" label="Playlists" active={page === 'playlists'} onPress={() => setPage('playlists')} />
         <Nav icon="queue" label="Queue" active={page === 'queue'} onPress={() => setPage('queue')} />
         <View style={s.sidebarDivider} />
         <Text style={s.navCaption}>YOUR COLLECTION</Text>
@@ -472,13 +603,17 @@ export default function App() {
         {!wide && <View style={s.compactNav}>
           <Text style={s.compactBrand}>telopotify</Text>
           <Nav icon="library" label="Library" active={page === 'library'} onPress={() => setPage('library')} />
+          <Nav icon="favorite" label="Favorites" active={page === 'favorites'} onPress={() => setPage('favorites')} />
+          <Nav icon="playlist" label="Playlists" active={page === 'playlists'} onPress={() => setPage('playlists')} />
           <Nav icon="queue" label="Queue" active={page === 'queue'} onPress={() => setPage('queue')} />
         </View>}
-        <View style={s.topLine}><Text style={s.breadcrumb}>MY MUSIC  /  {page === 'library' ? 'LIBRARY' : 'QUEUE'}</Text>
+        <View style={s.topLine}><Text style={s.breadcrumb}>MY MUSIC  /  {page.toUpperCase()}</Text>
           <View style={s.topStatus}><View style={[s.statusDot, !online && s.statusDotIdle]} />
             <Text style={s.topStatusText}>{currentLabel}</Text></View></View>
         <Text style={s.heading}>{pageTitle}</Text>
         <Text style={s.subtitle}>{page === 'library' ? 'Every song from your channel, ready when you are.' :
+          page === 'favorites' ? 'The songs you keep coming back to.' :
+          page === 'playlists' ? 'Build your own collections from the channel.' :
           'The songs lined up for your listening session.'}</Text>
         {!bridge && <View style={s.setupPanel}>
           <Text style={s.setupTitle}>Finding your local library…</Text>
@@ -523,6 +658,58 @@ export default function App() {
             <Icon name="sync" size={15} color={c.soft} /><Text style={s.alertActionText}>Retry</Text>
           </Pressable>
         </View>}
+        {!!collectionError && <Text style={s.authError}>{collectionError}</Text>}
+        {page === 'playlists' && <View style={s.playlistPanel}>
+          <Text style={s.panelEyebrow}>YOUR PLAYLISTS</Text>
+          <View style={s.playlistCreateRow}>
+            <TextInput accessibilityLabel="New playlist name" placeholder="Name a new playlist"
+              placeholderTextColor={c.muted} value={newPlaylistName} onChangeText={setNewPlaylistName}
+              maxLength={60} style={[s.search, s.playlistInput]} />
+            <Pressable accessibilityRole="button" accessibilityLabel="Create playlist"
+              disabled={!collectionsReady || !newPlaylistName.trim()} onPress={createPlaylist}
+              style={[s.smallPrimary, (!collectionsReady || !newPlaylistName.trim()) && s.syncButtonDisabled]}>
+              <Icon name="add" size={15} color={c.bg} /><Text style={s.smallPrimaryText}>Create</Text>
+            </Pressable>
+          </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.playlistTabs}>
+            {playlists.map(item => <Pressable key={item.id} accessibilityRole="button"
+              accessibilityLabel={`Open playlist ${item.name}`} onPress={() => {
+                setActivePlaylistId(item.id); setRenamePlaylistName(item.name);
+              }} style={[s.playlistTab, activePlaylist?.id === item.id && s.playlistTabActive]}>
+              <Icon name="playlist" size={15} color={activePlaylist?.id === item.id ? c.soft : c.muted} />
+              <Text numberOfLines={1} style={s.playlistTabText}>{item.name}</Text>
+              <Text style={s.playlistTabCount}>{item.trackIds.length}</Text>
+            </Pressable>)}
+          </ScrollView>
+          {activePlaylist && <View style={s.playlistEditRow}>
+            <TextInput accessibilityLabel="Rename playlist" value={renamePlaylistName}
+              onChangeText={setRenamePlaylistName} maxLength={60} style={[s.search, s.playlistInput]} />
+            <Pressable accessibilityRole="button" accessibilityLabel="Save playlist name"
+              onPress={renamePlaylist} style={s.smallSecondary}><Icon name="playlist" size={15} color={c.soft} />
+              <Text style={s.smallSecondaryText}>Rename</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Play playlist"
+              disabled={!activePlaylist.trackIds.length || !online}
+              onPress={() => playSongs(activePlaylist.trackIds)} style={[s.smallSecondary,
+                (!activePlaylist.trackIds.length || !online) && s.syncButtonDisabled]}>
+              <Icon name="play" size={15} color={c.soft} /><Text style={s.smallSecondaryText}>Play</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Delete playlist"
+              onPress={deletePlaylist} style={s.smallDanger}><Icon name="delete" size={15} color="#ffc7d1" /></Pressable>
+          </View>}
+          {!playlists.length && <Text style={s.panelHelp}>Create a playlist, then use the list icon beside a song to add it.</Text>}
+        </View>}
+        {playlistPickerTrackId && <View style={s.playlistPanel}>
+          <View style={s.pickerHeading}><Text style={s.setupTitle}>Add to playlist</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close playlist picker"
+              onPress={() => setPlaylistPickerTrackId(null)}><Icon name="remove" size={18} color={c.muted} /></Pressable></View>
+          <Text style={s.panelHelp} numberOfLines={1}>{tracks.find(track => track.id === playlistPickerTrackId)?.title}</Text>
+          <View style={s.pickerChoices}>{playlists.map(item => <Pressable key={item.id}
+            accessibilityRole="button" accessibilityLabel={`${item.trackIds.includes(playlistPickerTrackId) ? 'Remove from' : 'Add to'} playlist ${item.name}`}
+            onPress={() => togglePlaylistTrack(item.id, playlistPickerTrackId)}
+            style={[s.playlistTab, item.trackIds.includes(playlistPickerTrackId) && s.playlistTabActive]}>
+            <Icon name={item.trackIds.includes(playlistPickerTrackId) ? 'favoriteFilled' : 'add'} size={15} color={c.soft} />
+            <Text numberOfLines={1} style={s.playlistTabText}>{item.name}</Text></Pressable>)}</View>
+          {!playlists.length && <Text style={s.panelHelp}>Create a playlist in the Playlists tab first.</Text>}
+        </View>}
         {bridge && authenticated && channelOptions && <View style={s.setupPanel}>
           <Text style={s.setupTitle}>Choose a channel</Text>
           <TextInput accessibilityLabel="Search channels" placeholder="Search channels"
@@ -553,43 +740,83 @@ export default function App() {
           </View>{wide && <View style={s.heroArt}><View style={s.heroRecord}><View style={s.heroRecordInner}>
             <Icon name="music" size={28} color={c.soft} /></View></View></View>}
         </View>}
-        <View style={[s.toolbar, !wide && s.toolbarCompact]}><View><Text style={s.section}>{page === 'library' ? 'All songs' : 'Up next'}</Text>
-          <Text style={s.sectionSub}>{items.length.toLocaleString()} tracks{page === 'library' && query ? ' found' : ''}{syncError ? ' · Sync will retry when Telegram is available.' : syncMessage ? ` · ${syncMessage}` : ''}</Text></View>
-          {page === 'library' && <View style={[s.toolbarActions, !wide && s.toolbarActionsCompact]}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Sync new songs"
+        <View style={[s.toolbar, !wide && s.toolbarCompact]}><View><Text style={s.section}>{page === 'library' ? 'All songs' :
+          page === 'favorites' ? 'Liked songs' : page === 'playlists' ? activePlaylist?.name ?? 'Playlist songs' : 'Up next'}</Text>
+          <Text style={s.sectionSub}>{items.length.toLocaleString()} tracks{(page === 'library' || page === 'favorites') && query ? ' found' : ''}{syncError ? ' · Sync will retry when Telegram is available.' : syncMessage ? ` · ${syncMessage}` : ''}</Text></View>
+          <View style={[s.toolbarActions, !wide && s.toolbarActionsCompact]}>
+            {page === 'library' && <Pressable accessibilityRole="button" accessibilityLabel="Sync new songs"
               disabled={!online || syncBusy || syncing} onPress={syncLibrary}
               style={[s.syncButton, (!online || syncBusy || syncing) && s.syncButtonDisabled]}>
               <Icon name="sync" size={15} color={c.soft} /><Text style={s.syncButtonText}>{syncBusy || syncing ? 'Syncing' : 'Sync'}</Text>
-            </Pressable>
-            <View style={[s.searchBox, !wide && s.searchCompact]}><Icon name="search" size={16} color={c.muted} />
+            </Pressable>}
+            {(page === 'favorites' || page === 'playlists') && !!items.length && <Pressable
+              accessibilityRole="button" accessibilityLabel="Play all shown songs" disabled={!online}
+              onPress={() => playSongs(items.map(track => track.id))}
+              style={[s.syncButton, !online && s.syncButtonDisabled]}><Icon name="play" size={15} color={c.soft} />
+              <Text style={s.syncButtonText}>Play all</Text></Pressable>}
+            {page === 'queue' && !!queue.trackIds.length && <Pressable accessibilityRole="button"
+              accessibilityLabel="Clear play queue" onPress={clearQueue} style={s.syncButton}>
+              <Icon name="remove" size={15} color={c.soft} /><Text style={s.syncButtonText}>Clear queue</Text>
+            </Pressable>}
+            {(page === 'library' || page === 'favorites') && <View style={[s.searchBox, !wide && s.searchCompact]}>
+              <Icon name="search" size={16} color={c.muted} />
               <TextInput accessibilityLabel="Search songs" placeholder="Search songs or artists"
-                placeholderTextColor={c.muted} value={query} onChangeText={setQuery} style={s.searchField} /></View>
-          </View>}</View>
+                placeholderTextColor={c.muted} value={query} onChangeText={setQuery} style={s.searchField} /></View>}
+          </View></View>
         <View style={s.tableHead}><Text style={s.tableNumber}>#</Text><View style={s.tableCover} /><Text style={s.tableTitle}>TITLE</Text>
-          {wide && <Text style={s.tableSize}>SIZE</Text>}<Text style={s.tableDuration}>TIME</Text></View>
+          {wide && <Text style={s.tableSize}>SIZE</Text>}<Text style={s.tableDuration}>TIME</Text>
+          <View style={s.tableActions} /></View>
         <FlatList data={items} keyExtractor={item => item.id}
-          renderItem={({ item, index }) => <Pressable
-            accessibilityRole="button" accessibilityLabel={unavailableTrackIds.has(item.id) ? `${item.title} unavailable` : `Play ${item.title}`}
-            disabled={unavailableTrackIds.has(item.id)}
-            onPress={() => {
-              setQueue(current => page === 'library'
-                ? { ...createQueue(playableTracks.map(track => track.id), item.id), repeat: current.repeat }
-                : { ...current, currentIndex: index });
-              playTrack(item);
-            }}
+          renderItem={({ item, index }) => <View
             style={[s.row, selected?.id === item.id && s.selected, unavailableTrackIds.has(item.id) && s.unavailableRow]}>
-            <Text style={[s.rowNumber, selected?.id === item.id && s.activeRowText]}>{String(index + 1).padStart(2, '0')}</Text>
-            <Cover track={item} />
-            <View style={s.trackText}>
-              <Text numberOfLines={1} style={[s.trackTitle, selected?.id === item.id && s.activeRowText]}>{item.title}</Text>
-              <Text numberOfLines={1} style={s.trackArtist}>{item.artist}{unavailableTrackIds.has(item.id) ? ' · Unavailable' : ''}</Text>
-            </View>
+            <Pressable accessibilityRole="button"
+              accessibilityLabel={unavailableTrackIds.has(item.id) ? `${item.title} unavailable` : `Play ${item.title}`}
+              disabled={unavailableTrackIds.has(item.id)}
+              onPress={() => {
+                if (page === 'queue') {
+                  setQueue(current => ({ ...current, currentIndex: current.trackIds.indexOf(item.id) }));
+                  playTrack(item);
+                } else playSongs(page === 'library' ? playableTracks.map(track => track.id) :
+                  page === 'favorites' ? items.map(track => track.id) : activePlaylist?.trackIds ?? [], item.id);
+              }} style={s.rowMain}>
+              <Text style={[s.rowNumber, selected?.id === item.id && s.activeRowText]}>{String(index + 1).padStart(2, '0')}</Text>
+              <Cover track={item} />
+              <View style={s.trackText}>
+                <Text numberOfLines={1} style={[s.trackTitle, selected?.id === item.id && s.activeRowText]}>{item.title}</Text>
+                <Text numberOfLines={1} style={s.trackArtist}>{item.artist}{unavailableTrackIds.has(item.id) ? ' · Unavailable' : ''}</Text>
+              </View>
+            </Pressable>
             {wide && <Text style={s.rowSize}>{size(item.fileSize)}</Text>}
             <Text style={s.rowDuration}>{item.durationSeconds ? clock(item.durationSeconds) : '—'}</Text>
-          </Pressable>}
+            <View style={s.rowActions}>
+              {page !== 'queue' && <RowAction icon={favorites.includes(item.id) ? 'favoriteFilled' : 'favorite'}
+                label={`${favorites.includes(item.id) ? 'Remove' : 'Add'} favorite ${item.title}`}
+                active={favorites.includes(item.id)} onPress={() => toggleFavorite(item.id)} />}
+              {(page === 'library' || page === 'favorites') && <RowAction icon="playlist"
+                label={`Add ${item.title} to playlist`} disabled={!collectionsReady}
+                onPress={() => setPlaylistPickerTrackId(item.id)} />}
+              {page === 'playlists' && activePlaylist && <RowAction icon="remove"
+                label={`Remove ${item.title} from playlist`} onPress={() => togglePlaylistTrack(activePlaylist.id, item.id)} />}
+              {page !== 'queue' && <RowAction icon="add" label={`Play ${item.title} next`}
+                disabled={unavailableTrackIds.has(item.id)} onPress={() => setQueue(current => playNextInQueue(current, item.id))} />}
+              {page === 'queue' && <>
+                <RowAction icon="up" label={`Move ${item.title} up`} disabled={index === 0}
+                  onPress={() => setQueue(current => moveQueueTrack(current, item.id, -1))} />
+                <RowAction icon="down" label={`Move ${item.title} down`} disabled={index === items.length - 1}
+                  onPress={() => setQueue(current => moveQueueTrack(current, item.id, 1))} />
+                <RowAction icon="remove" label={`Remove ${item.title} from queue`}
+                  onPress={() => removeQueuedTrack(item.id)} />
+              </>}
+            </View>
+          </View>}
           ListEmptyComponent={<View style={s.emptyCard}><Icon name="music" size={28} color={c.accent} />
-            <Text style={s.emptyTitle}>{query ? 'No songs found' : page === 'queue' ? 'Your queue is empty' : 'Your songs will appear here'}</Text>
-            <Text style={s.empty}> {query ? 'Try a different title or artist.' : connectionStatus}</Text></View>} />
+            <Text style={s.emptyTitle}>{query && (page === 'library' || page === 'favorites') ? 'No songs found' :
+              page === 'queue' ? 'Your queue is empty' : page === 'favorites' ? 'No favorites yet' :
+              page === 'playlists' ? 'This playlist is empty' : 'Your songs will appear here'}</Text>
+            <Text style={s.empty}>{page === 'favorites' ? 'Use the star beside a song to save it here.' :
+              page === 'playlists' ? 'Add songs using the playlist icon in your library.' :
+              page === 'queue' ? 'Add songs from your library or a playlist.' :
+              query ? 'Try a different title or artist.' : connectionStatus}</Text></View>} />
       </View>
     </View>
     <View style={[s.playerBar, !wide && s.playerBarCompact]}>
@@ -646,6 +873,14 @@ export default function App() {
   </View>;
 }
 
+function RowAction({ icon, label, active = false, disabled = false, onPress }:
+  { icon: IconName; label: string; active?: boolean; disabled?: boolean; onPress: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
+    onPress={onPress} style={[s.rowAction, disabled && s.rowActionDisabled]}>
+    <Icon name={icon} size={16} color={active ? c.accent : c.muted} />
+  </Pressable>;
+}
+
 function CacheInfo({ stats, busy, onClear }: { stats: CacheStats; busy: boolean; onClear: () => void }) {
   const used = (stats.bytes / 1048576).toFixed(1);
   const limit = Math.round(stats.limitBytes / 1048576);
@@ -663,7 +898,7 @@ function CacheInfo({ stats, busy, onClear }: { stats: CacheStats; busy: boolean;
 }
 
 function Nav({ icon, label, active, onPress }: { icon: IconName; label: string; active: boolean; onPress: () => void }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ selected: active }}
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: active }}
     onPress={onPress} style={[s.nav, active && s.navActive]}>
     <Icon name={icon} size={18} color={active ? c.text : c.muted} />
     <Text style={[s.navText, active && s.navTextActive]}>{label}</Text>
@@ -705,8 +940,8 @@ const s = StyleSheet.create({
   navActive: { backgroundColor: '#2a2545' },
   navText: { color: c.muted, fontSize: 14, fontWeight: '600' },
   navTextActive: { color: c.text },
-  compactNav: { flexDirection: 'row', alignItems: 'center', marginBottom: 17, gap: 4 },
-  compactBrand: { color: c.text, fontSize: 17, fontWeight: '800', marginRight: 'auto' },
+  compactNav: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginBottom: 17, gap: 4 },
+  compactBrand: { color: c.text, fontSize: 17, fontWeight: '800', width: '100%', marginBottom: 8 },
   main: { flex: 1, paddingHorizontal: 30, paddingTop: 26, paddingBottom: 10 },
   topLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   breadcrumb: { color: c.accent, fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
@@ -740,6 +975,30 @@ const s = StyleSheet.create({
   alertAction: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11,
     paddingVertical: 8, backgroundColor: '#5a3745', borderRadius: 8 },
   alertActionText: { color: c.soft, fontSize: 11, fontWeight: '700' },
+  playlistPanel: { backgroundColor: c.panel, borderWidth: 1, borderColor: c.line,
+    borderRadius: 12, padding: 15, marginBottom: 16 },
+  panelEyebrow: { color: c.soft, fontSize: 10, fontWeight: '800', letterSpacing: 1.1, marginBottom: 10 },
+  panelHelp: { color: c.muted, fontSize: 12, marginTop: 8 },
+  playlistCreateRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  playlistInput: { flex: 1, minWidth: 100, width: undefined },
+  smallPrimary: { height: 36, paddingHorizontal: 12, borderRadius: 8, backgroundColor: c.accent,
+    flexDirection: 'row', alignItems: 'center', gap: 5 },
+  smallPrimaryText: { color: c.bg, fontSize: 12, fontWeight: '800' },
+  smallSecondary: { height: 36, paddingHorizontal: 10, borderRadius: 8, backgroundColor: c.raised,
+    borderWidth: 1, borderColor: c.line, flexDirection: 'row', alignItems: 'center', gap: 5 },
+  smallSecondaryText: { color: c.soft, fontSize: 11, fontWeight: '700' },
+  smallDanger: { height: 36, width: 36, borderRadius: 8, backgroundColor: '#54313c',
+    alignItems: 'center', justifyContent: 'center' },
+  playlistTabs: { marginTop: 12 },
+  playlistTab: { flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 8,
+    paddingHorizontal: 11, height: 34, backgroundColor: c.raised, borderWidth: 1,
+    borderColor: c.line, marginRight: 7, maxWidth: 200 },
+  playlistTabActive: { backgroundColor: '#342d57', borderColor: '#6b5e9d' },
+  playlistTabText: { color: c.text, fontSize: 11, fontWeight: '700', flexShrink: 1 },
+  playlistTabCount: { color: c.muted, fontSize: 10 },
+  playlistEditRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 12, flexWrap: 'wrap' },
+  pickerHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  pickerChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 10 },
   channelSearch: { backgroundColor: c.raised, borderRadius: 8, color: c.text,
     paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8 },
   channelList: { maxHeight: 180 },
@@ -781,7 +1040,12 @@ const s = StyleSheet.create({
   tableTitle: { color: '#7b899f', flex: 1, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   tableSize: { color: '#7b899f', width: 100, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   tableDuration: { color: '#7b899f', width: 52, fontSize: 10, fontWeight: '800', letterSpacing: 1, textAlign: 'right', paddingRight: 9 },
+  tableActions: { width: 108 },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 7, paddingHorizontal: 9, borderRadius: 8, marginBottom: 2 },
+  rowMain: { flex: 1, flexDirection: 'row', alignItems: 'center', minWidth: 0 },
+  rowActions: { width: 108, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' },
+  rowAction: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 7 },
+  rowActionDisabled: { opacity: 0.35 },
   selected: { backgroundColor: '#27283f' },
   unavailableRow: { opacity: 0.45 },
   activeRowText: { color: c.soft },

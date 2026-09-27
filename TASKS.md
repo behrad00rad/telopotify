@@ -64,9 +64,9 @@ Done when: playback starts before a complete song download, seeking works, and s
 Done when: the user can find and play music comfortably at desktop and phone sizes.
 
 ### T07 — Add queue, favorites, and playlists
-- [ ] Implement next/previous, queue editing, shuffle, and repeat. Next/previous and repeat off/all/one are implemented; queue editing and shuffle remain.
-- [ ] Add favorites and create/edit/delete local playlists.
-- [ ] Persist user collections and restore the previous queue without unexpected autoplay.
+- [ ] Implement next/previous, queue editing, shuffle, and repeat. Next/previous, repeat off/all/one, Play next, and queue move/remove/clear are implemented; shuffle remains.
+- [x] Add favorites and create/edit/delete local playlists.
+- [x] Persist user collections per channel and restore the previous queue without unexpected autoplay. Data stays in ignored local storage and is removed on sign-out.
 
 Done when: collections survive restarts and queue behavior remains predictable when tracks become unavailable.
 
@@ -92,4 +92,4 @@ T01 → T02 → T03 → T04 → T05. T06 can start after T02 using fixture data;
 
 Initial scope excludes cross-device playlist sync, public multi-user hosting, automatic full-library downloads, lyrics services, and audio effects. These can be separate follow-up tasks.
 
-Status: T01 desktop streaming gate is verified. The loopback bridge indexed 1,120 real songs, served a mid-file range, and the running Windows app reported playback and advanced to an unbuffered seek position. T02's Windows app shell builds, deploys, and runs. The Windows launcher starts a fixed-port local bridge and the app discovers and reconnects to it automatically. T03/T04 have in-app sign-in prompts, a channel picker, Windows DPAPI session storage, and incremental new-post sync from a saved cursor. A fresh login/logout test and a production Telegram adapter remain. T05/T07 include volume, repeat off/all/one, and native end-of-song advance; the native build passes, but these interactions still need live listening verification. T06 has a redesigned library, search, queue, and persistent player with Windows icon controls and a play/pause icon that follows playback state; desktop interaction and accessibility polish still need live review. See `TASK-01-FINDINGS.md`.
+Status: T01 desktop streaming gate is verified. The loopback bridge indexed 1,121 real songs, served a mid-file range, and the running Windows app reported playback and advanced to an unbuffered seek position. T02's Windows app shell builds, deploys, and runs. The Windows launcher starts a fixed-port local bridge and the app discovers and reconnects to it automatically. T03/T04 have in-app sign-in prompts, a channel picker, Windows DPAPI session storage, and incremental new-post sync from a saved cursor. A fresh login/logout test and a production Telegram adapter remain. T05 has volume, repeat off/all/one, native end-of-song advance, and a bounded in-memory cache; longer live interruption and listening tests remain. T06's Windows library and player received a visual review, with further keyboard and small-screen polish pending. T07 now has favorites, local playlists, and editable queue persistence; shuffle remains. See `TASK-01-FINDINGS.md`.

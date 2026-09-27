@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { trackFromAudio, mergeTracks, searchTracks } from './library.ts';
-import { advanceAfterEnd, createQueue, currentTrackId, nextTrack, previousTrack, removeFromQueue } from './queue.ts';
+import { addToQueue, advanceAfterEnd, createQueue, currentTrackId, moveQueueTrack, nextTrack,
+  playNextInQueue, previousTrack, removeFromQueue } from './queue.ts';
 import { trackFromTdMessage } from './tdlibMessages.ts';
 
 test('normalizes incomplete Telegram metadata and merges a repeated message', () => {
@@ -36,6 +37,19 @@ test('removing the current track advances to the next available item', () => {
   const changed = removeFromQueue(queue, 'b');
   assert.equal(currentTrackId(changed), 'c');
   assert.equal(currentTrackId(removeFromQueue(changed, 'c')), 'a');
+});
+
+test('queue editing preserves the selected song while moving and adding tracks', () => {
+  const queue = createQueue(['a', 'b', 'c'], 'b');
+  const moved = moveQueueTrack(queue, 'b', 1);
+  assert.deepEqual(moved.trackIds, ['a', 'c', 'b']);
+  assert.equal(currentTrackId(moved), 'b');
+  assert.deepEqual(addToQueue(moved, 'd').trackIds, ['a', 'c', 'b', 'd']);
+  assert.equal(addToQueue(moved, 'b'), moved);
+  const next = playNextInQueue(queue, 'c');
+  assert.deepEqual(next.trackIds, ['a', 'b', 'c']);
+  assert.deepEqual(playNextInQueue(next, 'a').trackIds, ['b', 'a', 'c']);
+  assert.equal(currentTrackId(playNextInQueue(next, 'a')), 'b');
 });
 
 test('maps TDLib audio and audio document messages without fetching media', () => {

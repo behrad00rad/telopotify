@@ -66,6 +66,8 @@ The library has a channel collection header, search, a song table, a queue view,
 
 The bridge keeps recent audio ranges in RAM, capped at 32 MiB by default; it never saves audio to disk. Set `TELOPOTIFY_CACHE_MB` to an integer from 0 to 256 before starting the bridge to change the cap (0 disables it). The player shows usage and a **Clear** control. The cache clears on bridge restart, channel change, and sign-out; its oldest ranges are evicted first, preferring to keep the currently requested song. A deleted song is marked unavailable when Telegram confirms its message is gone, and the player skips it in the queue. Streaming errors show a Retry control. A real network outage and removed-song scenario still need live testing.
 
+Favorites, named playlists, and the edited play queue are saved per channel in ignored `local-data/collections.json`. Star a song to add it to Favorites, use its playlist icon to add or remove it from a playlist, and use **Play next** to move it after the current song. The Queue view lets you move songs up or down, remove them, or clear the queue. Playlists can be created, renamed, played, and deleted. The previous queue and repeat mode restore after restart without starting playback. **Sign out** removes these local collections along with the session and catalog. This development bridge stores collection metadata locally; it does not sync it to Telegram or across devices.
+
 On this machine, the user approved enabling `AllowAllTrustedApps`, and React Native deployed and launched the app successfully. The Visual Studio installer requested a restart, but the build and launch succeeded without one.
 
 ## Import channel metadata without an API ID

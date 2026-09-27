@@ -26,6 +26,8 @@ test('connects automatically to the local bridge and loads a selected channel', 
   let synced = false;
   let revision = 0;
   let cacheBytes = 1024;
+  let savedCollections = { channelId: '-100123', favorites: [] as string[], playlists: [] as object[],
+    queue: { trackIds: [] as string[], currentTrackId: null as string | null, repeat: 'off' } };
   const originalAudio = NativeModules.TelopotifyAudio;
   NativeModules.TelopotifyAudio = {
     play: jest.fn(), pause: jest.fn(), resume: jest.fn(), stop: jest.fn(),
@@ -58,8 +60,11 @@ test('connects automatically to the local bridge and loads a selected channel', 
       expect(options?.method).toBe('POST');
       cacheBytes = 0;
       data = { bytes: 0, limitBytes: 32 * 1048576, chunks: 0 };
+    } else if (path.includes('/collections?')) {
+      if (options?.method === 'POST') savedCollections = JSON.parse(String(options.body));
+      data = savedCollections;
     } else if (path.includes('/library?')) data = { channel: selected ? 'My Music' : '',
-      channelId: selected ? 'channel-1' : null, online: selected, catalogRevision: revision,
+      channelId: selected ? '-100123' : null, online: selected, catalogRevision: revision,
       unavailableTrackIds: [],
       tracks: selected ? [{ messageId: 7, title: 'Song', artist: 'Artist',
         durationSeconds: 120, fileSize: 1000, mimeType: 'audio/mpeg' },
@@ -94,11 +99,60 @@ test('connects automatically to the local bridge and loads a selected channel', 
       await renderer.root.findByProps({ accessibilityLabel: 'Sync new songs' }).props.onPress();
     });
     expect(renderer.root.findByProps({ accessibilityLabel: 'Play New Song' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Play New Song next' }).props.onPress();
+    });
     expect(renderer.root.findByProps({ accessibilityLabel: 'Pause selected song' })).toBeTruthy();
     await ReactTestRenderer.act(async () => {
       await renderer.root.findByProps({ accessibilityLabel: 'Clear streaming cache' }).props.onPress();
     });
     expect(cacheBytes).toBe(0);
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Add favorite Song' }).props.onPress();
+      renderer.root.findByProps({ accessibilityLabel: 'Playlists' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'New playlist name' }).props.onChangeText('Mix');
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Create playlist' }).props.onPress();
+      renderer.root.findByProps({ accessibilityLabel: 'Library' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Add Song to playlist' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Add to playlist Mix' }).props.onPress();
+      renderer.root.findByProps({ accessibilityLabel: 'Close playlist picker' }).props.onPress();
+      renderer.root.findByProps({ accessibilityLabel: 'Playlists' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Queue' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Move New Song up' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Pause selected song' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Remove New Song from queue' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      await new Promise<void>(resolve => setTimeout(resolve, 500));
+    });
+    expect(savedCollections.favorites).toContain('7');
+    expect(savedCollections.playlists).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'Mix', trackIds: ['7'] }),
+    ]));
+    const playCalls = (NativeModules.TelopotifyAudio.play as jest.Mock).mock.calls.length;
+    await ReactTestRenderer.act(async () => { renderer.unmount(); });
+    await ReactTestRenderer.act(async () => { renderer = ReactTestRenderer.create(<App />); });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Favorites' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
+    expect((NativeModules.TelopotifyAudio.play as jest.Mock).mock.calls.length).toBe(playCalls);
   } finally {
     await ReactTestRenderer.act(async () => { renderer?.unmount(); });
     fetchMock.mockRestore();
