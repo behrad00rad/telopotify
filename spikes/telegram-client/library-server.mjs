@@ -2,11 +2,11 @@ import { TelegramClient, Api } from 'teleproto';
 import { StringSession } from 'teleproto/sessions/index.js';
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseRange } from '../range-stream/range.mjs';
 import { CHUNK_BYTES, fetchTelegramChunk } from './chunks.mjs';
-import { parseLibraryCache } from './library-cache.mjs';
+import { mergeRecentTracks, parseLibraryCache } from './library-cache.mjs';
 import { createAuthFlow } from './auth-flow.mjs';
 import { readSession, removeSession, saveSession } from './session-store.mjs';
 import { restoreDelay, shouldRetryRestore } from './restore-policy.mjs';
@@ -19,6 +19,8 @@ const SESSION_PATH = resolve(DATA_DIR, 'telegram.session');
 const CONNECTION_PATH = resolve(DATA_DIR, 'bridge-connection.json');
 const LIBRARY_CACHE_PATH = resolve(DATA_DIR, 'bridge-library.json');
 const MAX_MESSAGES = 2000;
+const SYNC_BATCH = 100;
+const SYNC_INTERVAL_MS = 60_000;
 const BRIDGE_PORT = 43127;
 const token = randomBytes(24).toString('hex');
 
@@ -33,6 +35,11 @@ let channel = '';
 let tracks = [];
 let messages = new Map();
 let indexing = false;
+let syncing = false;
+let lastSyncedMessageId = 0;
+let catalogRevision = 0;
+let lastSyncedAt = null;
+let syncError = '';
 let reconnecting = false;
 let restoreAttempts = 0;
 let restoreTimer = null;
@@ -68,6 +75,17 @@ async function optionalFile(path) {
   catch (error) { if (error.code === 'ENOENT') return ''; throw error; }
 }
 
+async function saveLibraryCache(nextChannel, nextChannelId, nextTracks, cursor) {
+  const temporary = `${LIBRARY_CACHE_PATH}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify({ channel: nextChannel, channelId: nextChannelId,
+      lastSyncedMessageId: cursor, tracks: nextTracks }), { encoding: 'utf8', mode: 0o600 });
+    await rename(temporary, LIBRARY_CACHE_PATH);
+  } finally {
+    await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  }
+}
+
 async function bodyOf(request) {
   if (request.headers['content-type']?.split(';')[0] !== 'application/json') {
     throw new Error('Expected JSON');
@@ -89,7 +107,7 @@ async function channels() {
 }
 
 async function selectChannel(index) {
-  if (indexing) throw new Error('A channel is already being indexed');
+  if (indexing || syncing) throw new Error('The channel library is busy');
   const choices = await channels();
   if (!Number.isInteger(index) || index < 0 || index >= choices.length) {
     throw new Error('Select a channel from the list');
@@ -110,17 +128,61 @@ async function selectChannel(index) {
     }
     const nextChannel = dialog.title ?? dialog.name ?? 'Channel';
     const nextChannelId = String(dialog.id);
-    await writeFile(LIBRARY_CACHE_PATH, JSON.stringify({
-      channel: nextChannel, channelId: nextChannelId, tracks: nextTracks,
-    }), { encoding: 'utf8', mode: 0o600 });
+    const cursor = Math.max(0, ...nextTracks.map(track => track.messageId));
+    await saveLibraryCache(nextChannel, nextChannelId, nextTracks, cursor);
     selectedDialog = dialog;
     selectedChannelId = nextChannelId;
     channel = nextChannel;
     tracks = nextTracks;
     messages = nextMessages;
+    lastSyncedMessageId = cursor;
+    catalogRevision++;
+    lastSyncedAt = new Date().toISOString();
+    syncError = '';
     console.log(`Indexed ${tracks.length} songs without downloading audio.`);
     return { channel, count: tracks.length };
   } finally { indexing = false; }
+}
+
+async function syncSelectedChannel() {
+  if (!authenticated || !selectedDialog || !client) throw new Error('Select a channel first');
+  if (indexing || syncing) return { added: 0, count: tracks.length, busy: true };
+  syncing = true;
+  const dialog = selectedDialog;
+  const cursor = lastSyncedMessageId;
+  let nextCursor = cursor;
+  const incoming = [];
+  const incomingMessages = new Map();
+  try {
+    for await (const message of client.iterMessages(dialog.inputEntity, {
+      filter: new Api.InputMessagesFilterMusic(), minId: cursor, reverse: true, limit: SYNC_BATCH,
+    })) {
+      nextCursor = Math.max(nextCursor, message.id);
+      const song = songFromMessage(message);
+      if (song) {
+        incoming.push(song);
+        incomingMessages.set(song.messageId, message);
+      }
+    }
+    if (selectedDialog !== dialog) return { added: 0, count: tracks.length, busy: false };
+    const currentIds = new Set(tracks.map(track => track.messageId));
+    const added = incoming.filter(song => !currentIds.has(song.messageId)).length;
+    if (nextCursor !== cursor || incoming.length) {
+      const nextTracks = mergeRecentTracks(tracks, incoming, MAX_MESSAGES);
+      await saveLibraryCache(channel, selectedChannelId, nextTracks, nextCursor);
+      tracks = nextTracks;
+      lastSyncedMessageId = nextCursor;
+      for (const [id, message] of incomingMessages) messages.set(id, message);
+      if (incoming.length) catalogRevision++;
+    }
+    lastSyncedAt = new Date().toISOString();
+    syncError = '';
+    if (added) console.log(`Added ${added} new channel songs without re-indexing the history.`);
+    return { added, count: tracks.length, busy: false };
+  } catch (error) {
+    syncError = error.message;
+    throw error;
+  } finally { syncing = false; }
 }
 
 async function restoreSavedSession() {
@@ -146,7 +208,10 @@ async function restoreSavedSession() {
       try {
         const choices = await channels();
         const index = choices.findIndex(item => String(item.id) === selectedChannelId);
-        if (index >= 0) await selectChannel(index);
+        if (index >= 0) {
+          selectedDialog = choices[index];
+          await syncSelectedChannel();
+        }
       } catch { console.warn('Could not refresh the saved channel. Choose it again in the app.'); }
     }
   } catch (error) {
@@ -180,6 +245,9 @@ async function restoreSession() {
       channel = cached.channel;
       tracks = cached.tracks;
       selectedChannelId = cached.channelId ?? null;
+      lastSyncedMessageId = cached.lastSyncedMessageId ??
+        Math.max(0, ...cached.tracks.map(track => track.messageId));
+      catalogRevision++;
     }
   } catch { console.warn('Saved catalog is unavailable.'); }
   await restoreSavedSession();
@@ -191,7 +259,8 @@ function status() {
     authenticated, online: Boolean(authenticated && selectedDialog),
     step: initializing || reconnecting ? 'connecting' : authenticated ? 'authorized' : flow?.step ?? 'phone',
     error: flow?.error ?? '', channel, trackCount: tracks.length,
-    selected: Boolean(selectedDialog), indexing,
+    selected: Boolean(selectedDialog), indexing, syncing, catalogRevision,
+    lastSyncedAt, syncError,
   };
 }
 
@@ -212,6 +281,10 @@ async function logout() {
   channel = '';
   tracks = [];
   messages = new Map();
+  lastSyncedMessageId = 0;
+  catalogRevision++;
+  lastSyncedAt = null;
+  syncError = '';
   if (old) {
     if (old.connected) await old.logOut().catch(() => old.disconnect().catch(() => {}));
     else await old.disconnect().catch(() => {});
@@ -274,7 +347,11 @@ async function handle(request, response) {
       return json(response, 200, await selectChannel(index));
     }
     if (url.pathname === '/library' && request.method === 'GET') {
-      return json(response, 200, { channel, tracks, online: Boolean(authenticated && selectedDialog) });
+      return json(response, 200, { channel, channelId: selectedChannelId, tracks,
+        catalogRevision, online: Boolean(authenticated && selectedDialog) });
+    }
+    if (url.pathname === '/library/sync' && request.method === 'POST') {
+      return json(response, 200, await syncSelectedChannel());
     }
     const match = /^\/audio\/(\d+)$/.exec(url.pathname);
     if (!match) return json(response, 404, { error: 'Not found' });
@@ -285,9 +362,14 @@ async function handle(request, response) {
       return json(response, 405, { error: 'Method not allowed' });
     }
     const id = Number(match[1]);
-    const message = messages.get(id);
     const track = tracks.find(item => item.messageId === id);
-    if (!message || !track) return json(response, 404, { error: 'Song not found' });
+    if (!track) return json(response, 404, { error: 'Song not found' });
+    let message = messages.get(id);
+    if (!message) {
+      message = (await client.getMessages(selectedDialog.inputEntity, { ids: id }))[0];
+      if (!message || !songFromMessage(message)) return json(response, 404, { error: 'Song is no longer available' });
+      messages.set(id, message);
+    }
     const parsed = parseRange(request.headers.range, track.fileSize);
     if (!parsed) {
       response.writeHead(416, { 'Content-Range': `bytes */${track.fileSize}` });
@@ -334,7 +416,13 @@ async function main() {
   console.log(`Local bridge ready at http://127.0.0.1:${BRIDGE_PORT}. The app connects automatically.`);
   console.log('Keep this terminal running. Ctrl+C stops the bridge.');
   restoreSession().catch(() => { initializing = false; console.warn('Could not restore Telegram session.'); });
+  const syncTimer = setInterval(() => {
+    if (authenticated && selectedDialog && !indexing && !syncing) {
+      syncSelectedChannel().catch(() => console.warn('Channel sync will retry later.'));
+    }
+  }, SYNC_INTERVAL_MS);
   process.on('SIGINT', async () => {
+    clearInterval(syncTimer);
     server.close();
     await client?.disconnect().catch(() => {});
     await unlink(CONNECTION_PATH).catch(() => {});

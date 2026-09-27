@@ -1,0 +1,32 @@
+import React from 'react';
+import { Platform, StyleSheet, Text } from 'react-native';
+
+export type IconName = 'music' | 'library' | 'queue' | 'sync' | 'search' |
+  'play' | 'pause' | 'previous' | 'next' | 'repeatAll' | 'repeatOne' | 'volume';
+
+// Windows system icon font; no image assets or emoji rendering are involved.
+const windowsGlyphs: Record<IconName, string> = {
+  music: '\uEC4F', library: '\uE8F1', queue: '\uE907', sync: '\uE895', search: '\uE721',
+  play: '\uE768', pause: '\uE769', previous: '\uE892', next: '\uE893',
+  repeatAll: '\uE8EE', repeatOne: '\uE8ED', volume: '\uE767',
+};
+
+const fallbackGlyphs: Record<IconName, string> = {
+  music: '♪', library: '▤', queue: '☷', sync: '↻', search: '⌕',
+  play: '▶︎', pause: 'Ⅱ', previous: '|◀', next: '▶|',
+  repeatAll: '↻', repeatOne: '↻1', volume: '◁',
+};
+
+export function Icon({ name, size = 18, color = '#f5f7fc' }:
+  { name: IconName; size?: number; color?: string }) {
+  const windows = Platform.OS === 'windows';
+  return <Text accessible={false} style={[s.icon, windows && s.windows,
+    { fontSize: size, lineHeight: size * 1.25, color }]}>
+    {windows ? windowsGlyphs[name] : fallbackGlyphs[name]}
+  </Text>;
+}
+
+const s = StyleSheet.create({
+  icon: { textAlign: 'center' },
+  windows: { fontFamily: 'Segoe MDL2 Assets' },
+});

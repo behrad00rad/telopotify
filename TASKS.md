@@ -40,9 +40,9 @@ Done when: the user can sign in, restart without reauthenticating, and remove th
 
 ### T04 — Select a channel and index its songs
 - [x] Let the user select an accessible channel in the Windows app through the local development bridge. The bridge listed 58 accessible channels and indexed the selected 1,120-song channel.
-- [ ] Index audio messages incrementally, recording message references and available title, artist, duration, filename, and artwork metadata.
+- [ ] Index audio messages incrementally, recording message references and available title, artist, duration, filename, and artwork metadata. New music posts now sync from a saved message cursor; filename and artwork metadata remain.
 - [ ] Handle incomplete metadata, duplicates, removed messages, and access errors.
-- [ ] Persist the index locally and sync new posts without re-fetching the whole history.
+- [x] Persist the index locally and sync new posts without re-fetching the whole history. The bridge restores the cached catalog and checks newer messages on restart, every minute, or with the Sync button.
 
 Done when: a channel of roughly 1,000 songs can be browsed after indexing without downloading all audio files.
 
@@ -92,4 +92,4 @@ T01 → T02 → T03 → T04 → T05. T06 can start after T02 using fixture data;
 
 Initial scope excludes cross-device playlist sync, public multi-user hosting, automatic full-library downloads, lyrics services, and audio effects. These can be separate follow-up tasks.
 
-Status: T01 desktop streaming gate is verified. The loopback bridge indexed 1,120 real songs, served a mid-file range, and the running Windows app reported playback and advanced to an unbuffered seek position. T02's Windows app shell builds, deploys, and runs. The Windows launcher starts a fixed-port local bridge and the app discovers and reconnects to it automatically. T03/T04 have in-app sign-in prompts, a channel picker, and Windows DPAPI session storage. The encrypted session and selected 1,120-song channel restored after a live restart; a fresh login/logout test, incremental syncing, and a production Telegram adapter remain. T05/T07 include volume, repeat off/all/one, and native end-of-song advance; the native build passes, but these interactions still need live listening verification. T06 has a redesigned library, search, queue, and persistent player; desktop interaction and accessibility polish still need live review. See `TASK-01-FINDINGS.md`.
+Status: T01 desktop streaming gate is verified. The loopback bridge indexed 1,120 real songs, served a mid-file range, and the running Windows app reported playback and advanced to an unbuffered seek position. T02's Windows app shell builds, deploys, and runs. The Windows launcher starts a fixed-port local bridge and the app discovers and reconnects to it automatically. T03/T04 have in-app sign-in prompts, a channel picker, Windows DPAPI session storage, and incremental new-post sync from a saved cursor. A fresh login/logout test and a production Telegram adapter remain. T05/T07 include volume, repeat off/all/one, and native end-of-song advance; the native build passes, but these interactions still need live listening verification. T06 has a redesigned library, search, queue, and persistent player with Windows icon controls and a play/pause icon that follows playback state; desktop interaction and accessibility polish still need live review. See `TASK-01-FINDINGS.md`.
