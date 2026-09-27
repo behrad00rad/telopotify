@@ -47,8 +47,8 @@ Done when: the user can sign in, restart without reauthenticating, and remove th
 Done when: a channel of roughly 1,000 songs can be browsed after indexing without downloading all audio files.
 
 ### T05 — Build on-demand playback and bounded caching
-- [ ] Implement play/pause, seeking, volume, loading/error states, and retry behavior. Windows play/pause, position display, seeking, volume, end-of-song advance, and native status/error reporting are implemented; recovery still needs work.
-- [ ] Fetch audio in chunks through the validated Telegram adapter; refresh stale file references as needed.
+- [ ] Implement play/pause, seeking, volume, loading/error states, and retry behavior. Windows play/pause, position display, seeking, volume, end-of-song advance, and native status/error reporting are implemented. The app clears stale playback state when the bridge goes offline; retry UI and deeper interruption testing remain.
+- [x] Fetch audio in chunks through the validated Telegram adapter; refresh stale file references once when Telegram reports an expired or invalid reference.
 - [ ] Limit prefetching and cancel unnecessary requests when tracks change.
 - [ ] Enforce a configurable cache limit, protect active playback data, and offer clear-cache controls.
 - [ ] Recover from network loss and Telegram rate limits without aggressive retries.

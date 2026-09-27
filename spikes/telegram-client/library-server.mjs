@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseRange } from '../range-stream/range.mjs';
-import { CHUNK_BYTES, fetchTelegramChunk } from './chunks.mjs';
+import { CHUNK_BYTES, fetchTelegramChunk, isStaleFileReference } from './chunks.mjs';
 import { mergeRecentTracks, parseLibraryCache } from './library-cache.mjs';
 import { createAuthFlow } from './auth-flow.mjs';
 import { readSession, removeSession, saveSession } from './session-store.mjs';
@@ -390,7 +390,16 @@ async function handle(request, response) {
     }
     const abort = new AbortController();
     response.on('close', () => abort.abort());
-    const chunk = await fetchTelegramChunk(client, message, parsed.start, length, abort.signal);
+    let chunk;
+    try {
+      chunk = await fetchTelegramChunk(client, message, parsed.start, length, abort.signal);
+    } catch (error) {
+      if (!isStaleFileReference(error) || abort.signal.aborted) throw error;
+      const fresh = (await client.getMessages(selectedDialog.inputEntity, { ids: id }))[0];
+      if (!fresh || !songFromMessage(fresh)) return json(response, 404, { error: 'Song is no longer available' });
+      messages.set(id, fresh);
+      chunk = await fetchTelegramChunk(client, fresh, parsed.start, length, abort.signal);
+    }
     if (response.destroyed) return;
     response.writeHead(206, headers);
     response.end(chunk);

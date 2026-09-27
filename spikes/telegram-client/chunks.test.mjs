@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { CHUNK_BYTES, readTelegramRange, fetchTelegramChunk } from './chunks.mjs';
+import { CHUNK_BYTES, readTelegramRange, fetchTelegramChunk, isStaleFileReference } from './chunks.mjs';
 
 test('aligns an arbitrary seek and yields exactly the requested bytes', async () => {
   const bytes = Buffer.alloc(CHUNK_BYTES * 3);
@@ -41,4 +41,11 @@ test('retries a transient Telegram failure before returning a complete chunk', a
 test('rejects a short Telegram download instead of returning a partial HTTP body', async () => {
   const client = { async *iterDownload() { yield Buffer.from('ab'); } };
   await assert.rejects(fetchTelegramChunk(client, {}, 0, 4), /Incomplete Telegram chunk/);
+});
+
+test('recognizes Telegram errors that require a fresh message reference', () => {
+  assert.equal(isStaleFileReference({ errorMessage: 'FILE_REFERENCE_EXPIRED' }), true);
+  assert.equal(isStaleFileReference(new Error('FILE_REFERENCE_INVALID')), true);
+  assert.equal(isStaleFileReference(new Error('FILEREF_UPGRADE_NEEDED')), true);
+  assert.equal(isStaleFileReference(Object.assign(new Error('socket reset'), { code: 'ECONNRESET' })), false);
 });

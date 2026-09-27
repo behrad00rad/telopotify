@@ -212,7 +212,16 @@ export default function App() {
       await loadLibrary(connection);
     }
     if (!data.online) {
-      if (lastOnline.current && Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
+      if (lastOnline.current) {
+        if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
+        endedHandled.current = false;
+        setPlayingTrackId(null);
+        setPaused(false);
+        setPlaybackStatus('stopped');
+        setPosition(0);
+        setNativeDuration(0);
+        setConnectionStatus(data.trackCount ? `${data.trackCount} saved songs · Telegram offline` : 'Telegram offline');
+      }
       lastOnline.current = false;
       setBridge(current => current && current.token === connection.token && current.online ?
         { ...current, online: false } : current);
@@ -232,6 +241,10 @@ export default function App() {
         lastOnline.current = false;
         if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
         setPlayingTrackId(null);
+        setPaused(false);
+        setPlaybackStatus('stopped');
+        setPosition(0);
+        setNativeDuration(0);
         setBridge(null);
         setConnectionStatus('Library service unavailable. Reconnecting…');
       }).finally(() => { refreshing = false; });

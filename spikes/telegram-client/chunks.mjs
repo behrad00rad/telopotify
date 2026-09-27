@@ -28,6 +28,11 @@ export async function* readTelegramRange(client, message, start, length, signal)
 
 const TRANSIENT_NETWORK_ERRORS = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE']);
 
+export function isStaleFileReference(error) {
+  const description = `${error?.errorMessage ?? ''} ${error?.message ?? ''}`;
+  return /FILE_REFERENCE_(?:EXPIRED|INVALID)|FILEREF_UPGRADE_NEEDED/i.test(description);
+}
+
 export async function fetchTelegramChunk(client, message, start, length, signal) {
   for (let attempt = 0; attempt < 3; attempt++) {
     if (signal?.aborted) throw signal.reason ?? new Error('Request cancelled');
