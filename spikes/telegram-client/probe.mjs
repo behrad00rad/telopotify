@@ -1,9 +1,10 @@
 import { TelegramClient, Api } from 'teleproto';
 import { StringSession } from 'teleproto/sessions/index.js';
+import { readSession, saveSession } from './session-store.mjs';
 import { createInterface } from 'node:readline/promises';
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseRange } from '../range-stream/range.mjs';
 import { CHUNK_BYTES, readTelegramRange } from './chunks.mjs';
@@ -54,10 +55,7 @@ async function chooseAudio(dialog) {
 }
 
 async function main() {
-  let savedSession = '';
-  try { savedSession = await readFile(SESSION_PATH, 'utf8'); } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
+  const savedSession = await readSession(SESSION_PATH);
   client = new TelegramClient(new StringSession(savedSession), API_ID, API_HASH, {
     connectionRetries: 3,
   });
@@ -71,7 +69,7 @@ async function main() {
     onError: error => console.error(`Login error: ${error.message}`),
   });
   await mkdir(resolve('local-data'), { recursive: true });
-  await writeFile(SESSION_PATH, client.session.save(), { encoding: 'utf8', mode: 0o600 });
+  await saveSession(SESSION_PATH, client.session.save());
 
   const dialog = await chooseChannel();
   const message = await chooseAudio(dialog);

@@ -358,13 +358,13 @@ export default function App() {
           <Text style={s.setupHelp}>{connectionStatus}</Text>
         </View>}
         {bridge && !authenticated && <View style={s.setupPanel}>
-          <Text style={s.setupTitle}>Telegram sign-in</Text>
+          <Text style={s.setupTitle}>{authStep === 'connecting' ? 'Reconnecting to Telegram' : 'Telegram sign-in'}</Text>
           <Text style={s.setupHelp}>{authStep === 'phone' ? 'Enter your phone number with country code.' :
             authStep === 'code' ? 'Enter the code Telegram sent you.' :
             authStep === 'password' ? 'Enter your two-step verification password.' :
             authStep === 'email' ? 'Enter the email address Telegram requested.' :
             authStep === 'emailCode' ? 'Enter the code sent to your email.' :
-            'Contacting Telegram…'}</Text>
+            'Your saved songs are still here. Telegram will reconnect automatically.'}</Text>
           {['phone', 'code', 'password', 'email', 'emailCode'].includes(authStep) && <View style={s.connectRow}>
             <TextInput accessibilityLabel={authStep === 'phone' ? 'Telegram phone number' : 'Telegram verification input'}
               placeholder={authStep === 'phone' ? '+15555550123' : authStep === 'password' ? 'Two-step password' : 'Verification code'}

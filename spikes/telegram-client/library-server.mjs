@@ -8,6 +8,8 @@ import { parseRange } from '../range-stream/range.mjs';
 import { CHUNK_BYTES, fetchTelegramChunk } from './chunks.mjs';
 import { parseLibraryCache } from './library-cache.mjs';
 import { createAuthFlow } from './auth-flow.mjs';
+import { readSession, removeSession, saveSession } from './session-store.mjs';
+import { restoreDelay, shouldRetryRestore } from './restore-policy.mjs';
 
 // Public test-only credentials from Telegram Desktop. Never ship these in an app.
 const API_ID = 17349;
@@ -31,6 +33,10 @@ let channel = '';
 let tracks = [];
 let messages = new Map();
 let indexing = false;
+let reconnecting = false;
+let restoreAttempts = 0;
+let restoreTimer = null;
+let restoreEpoch = 0;
 
 function newClient(session = '') {
   return new TelegramClient(new StringSession(session), API_ID, API_HASH, { connectionRetries: 3 });
@@ -117,6 +123,55 @@ async function selectChannel(index) {
   } finally { indexing = false; }
 }
 
+async function restoreSavedSession() {
+  const epoch = restoreEpoch;
+  const session = await readSession(SESSION_PATH);
+  if (epoch !== restoreEpoch) return;
+  if (!session) { initializing = false; reconnecting = false; return; }
+  const candidate = newClient(session);
+  client = candidate;
+  try {
+    await candidate.connect();
+    await candidate.getMe();
+    if (epoch !== restoreEpoch) {
+      await candidate.disconnect().catch(() => {});
+      if (client === candidate) client = null;
+      return;
+    }
+    authenticated = true;
+    reconnecting = false;
+    restoreAttempts = 0;
+    console.log('Saved Telegram session restored.');
+    if (selectedChannelId) {
+      try {
+        const choices = await channels();
+        const index = choices.findIndex(item => String(item.id) === selectedChannelId);
+        if (index >= 0) await selectChannel(index);
+      } catch { console.warn('Could not refresh the saved channel. Choose it again in the app.'); }
+    }
+  } catch (error) {
+    await candidate.disconnect().catch(() => {});
+    if (epoch !== restoreEpoch) {
+      if (client === candidate) client = null;
+      return;
+    }
+    if (client === candidate) client = null;
+    authenticated = false;
+    if (!shouldRetryRestore(error)) {
+      reconnecting = false;
+      console.warn('Saved Telegram session needs renewal.');
+    } else {
+      reconnecting = true;
+      const delay = restoreDelay(restoreAttempts++);
+      console.warn(`Telegram is unavailable. Retrying in ${Math.round(delay / 1000)} seconds.`);
+      restoreTimer = setTimeout(() => {
+        restoreTimer = null;
+        restoreSavedSession().catch(() => { reconnecting = false; console.warn('Could not read saved Telegram session.'); });
+      }, delay);
+    }
+  } finally { initializing = false; }
+}
+
 async function restoreSession() {
   try {
     const cachedText = await optionalFile(LIBRARY_CACHE_PATH);
@@ -127,41 +182,25 @@ async function restoreSession() {
       selectedChannelId = cached.channelId ?? null;
     }
   } catch { console.warn('Saved catalog is unavailable.'); }
-
-  const session = (await optionalFile(SESSION_PATH)).trim();
-  if (!session) { initializing = false; return; }
-  client = newClient(session);
-  try {
-    await client.connect();
-    await client.getMe();
-    authenticated = true;
-    console.log('Saved Telegram session restored.');
-    if (selectedChannelId) {
-      try {
-        const choices = await channels();
-        const index = choices.findIndex(item => String(item.id) === selectedChannelId);
-        if (index >= 0) await selectChannel(index);
-      } catch { console.warn('Could not refresh the saved channel. Choose it again in the app.'); }
-    }
-  } catch {
-    console.warn('Telegram is unavailable or the saved session needs renewal.');
-    await client.disconnect().catch(() => {});
-    client = null;
-    authenticated = false;
-  } finally { initializing = false; }
+  await restoreSavedSession();
 }
 
 function status() {
   const flow = authFlow?.state();
   return {
     authenticated, online: Boolean(authenticated && selectedDialog),
-    step: initializing ? 'connecting' : authenticated ? 'authorized' : flow?.step ?? 'phone',
+    step: initializing || reconnecting ? 'connecting' : authenticated ? 'authorized' : flow?.step ?? 'phone',
     error: flow?.error ?? '', channel, trackCount: tracks.length,
     selected: Boolean(selectedDialog), indexing,
   };
 }
 
 async function logout() {
+  restoreEpoch++;
+  if (restoreTimer) clearTimeout(restoreTimer);
+  restoreTimer = null;
+  reconnecting = false;
+  initializing = false;
   authFlow?.cancel();
   authFlow = null;
   const old = client;
@@ -178,7 +217,7 @@ async function logout() {
     else await old.disconnect().catch(() => {});
   }
   await Promise.all([
-    unlink(SESSION_PATH).catch(error => { if (error.code !== 'ENOENT') throw error; }),
+    removeSession(SESSION_PATH),
     unlink(LIBRARY_CACHE_PATH).catch(error => { if (error.code !== 'ENOENT') throw error; }),
   ]);
 }
@@ -199,11 +238,15 @@ async function handle(request, response) {
     }
     if (url.pathname === '/auth/start' && request.method === 'POST') {
       if (authenticated || initializing) return json(response, 409, { error: 'Sign-in is not available now' });
+      restoreEpoch++;
+      if (restoreTimer) clearTimeout(restoreTimer);
+      restoreTimer = null;
+      reconnecting = false;
       const { phone } = await bodyOf(request);
       if (!authFlow) {
         client = newClient();
         authFlow = createAuthFlow(client, async () => {
-          await writeFile(SESSION_PATH, client.session.save(), { encoding: 'utf8', mode: 0o600 });
+          await saveSession(SESSION_PATH, client.session.save());
           authenticated = true;
         });
       }
