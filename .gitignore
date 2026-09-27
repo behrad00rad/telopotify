@@ -1,0 +1,34 @@
+# Credentials, local Telegram data, and downloaded media must never enter Git.
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+tdlib-data/
+tdlib-files/
+local-data/
+cache/
+downloads/
+exports/
+result.json
+
+# Build and editor outputs
+node_modules/
+dist/
+build/
+coverage/
+.idea/
+.vscode/
+*.log
+.bundle/
+
+# Local music used for playback experiments
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.wav
+
+# Local Android development signing key
+TelopotifyApp/android/app/debug.keystore
