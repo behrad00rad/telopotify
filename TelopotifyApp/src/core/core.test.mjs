@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { trackFromAudio, mergeTracks, searchTracks } from './library.ts';
-import { createQueue, currentTrackId, nextTrack, previousTrack, removeFromQueue } from './queue.ts';
+import { advanceAfterEnd, createQueue, currentTrackId, nextTrack, previousTrack, removeFromQueue } from './queue.ts';
 import { trackFromTdMessage } from './tdlibMessages.ts';
 
 test('normalizes incomplete Telegram metadata and merges a repeated message', () => {
@@ -20,6 +20,15 @@ test('queue navigation handles the end and repeat modes', () => {
   assert.equal(currentTrackId(nextTrack({ ...queue, repeat: 'all' })), 'a');
   assert.equal(currentTrackId(previousTrack({ ...queue, currentIndex: 0, repeat: 'all' })), 'b');
   assert.equal(currentTrackId(nextTrack({ ...queue, repeat: 'one' }, true)), 'b');
+});
+
+test('completion advances, repeats, or stops at the end of the queue', () => {
+  const first = createQueue(['a', 'b']);
+  assert.equal(currentTrackId(advanceAfterEnd(first)), 'b');
+  const last = { ...first, currentIndex: 1 };
+  assert.equal(advanceAfterEnd(last), null);
+  assert.equal(currentTrackId(advanceAfterEnd({ ...last, repeat: 'all' })), 'a');
+  assert.equal(currentTrackId(advanceAfterEnd({ ...last, repeat: 'one' })), 'b');
 });
 
 test('removing the current track advances to the next available item', () => {

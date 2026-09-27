@@ -4,6 +4,8 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Media.Core.h>
 #include <winrt/Windows.Media.Playback.h>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -23,11 +25,14 @@ struct TelopotifyAudio {
           std::scoped_lock lock(errorMutex);
           error = to_string(args.ErrorMessage());
         });
+        player.MediaEnded([this](auto const&, auto const&) { ended.store(true); });
+        player.Volume(desiredVolume);
       }
       {
         std::scoped_lock lock(errorMutex);
         error.clear();
       }
+      ended.store(false);
       auto uri = Windows::Foundation::Uri(to_hstring(url));
       player.Source(Windows::Media::Core::MediaSource::CreateFromUri(uri));
       player.Play();
@@ -47,7 +52,14 @@ struct TelopotifyAudio {
 
   REACT_METHOD(stop)
   void stop() noexcept {
-    try { if (player) player.Source(nullptr); } catch (...) {}
+    try { ended.store(false); if (player) player.Source(nullptr); } catch (...) {}
+  }
+
+  REACT_METHOD(setVolume)
+  void setVolume(double value) noexcept {
+    if (!std::isfinite(value)) return;
+    desiredVolume = std::clamp(value, 0.0, 1.0);
+    try { if (player) player.Volume(desiredVolume); } catch (...) {}
   }
 
   REACT_METHOD(seek)
@@ -67,6 +79,7 @@ struct TelopotifyAudio {
       std::scoped_lock lock(errorMutex);
       if (!error.empty()) return "error: " + error;
     }
+    if (ended.load()) return "ended";
     if (!player) return "stopped";
     try {
       switch (player.PlaybackSession().PlaybackState()) {
@@ -97,6 +110,8 @@ struct TelopotifyAudio {
     error = std::move(message);
   }
   Windows::Media::Playback::MediaPlayer player{nullptr};
+  std::atomic<bool> ended{false};
+  double desiredVolume{1.0};
   std::mutex errorMutex;
   std::string error;
 };

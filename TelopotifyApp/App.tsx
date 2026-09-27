@@ -4,7 +4,7 @@ import {
   TextInput, useWindowDimensions, View,
 } from 'react-native';
 import { searchTracks, type Track } from './src/core/library';
-import { createQueue, currentTrackId, nextTrack, previousTrack } from './src/core/queue';
+import { advanceAfterEnd, createQueue, currentTrackId, nextTrack, previousTrack } from './src/core/queue';
 
 const c = {
   bg: '#0d111b', panel: '#151b29', raised: '#202a3b', line: '#2b3547',
@@ -71,6 +71,9 @@ export default function App() {
   const [position, setPosition] = useState(0);
   const [nativeDuration, setNativeDuration] = useState(0);
   const [progressWidth, setProgressWidth] = useState(1);
+  const [volume, setVolume] = useState(1);
+  const [volumeWidth, setVolumeWidth] = useState(1);
+  const endedHandled = useRef(false);
   const [page, setPage] = useState<'library' | 'queue'>('library');
   const [queue, setQueue] = useState(() => createQueue([]));
   const visible = useMemo(() => searchTracks(tracks, query), [tracks, query]);
@@ -78,12 +81,48 @@ export default function App() {
   const duration = nativeDuration || selected?.durationSeconds || 0;
   const items = page === 'library' ? visible : queue.trackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean);
 
+  const playTrack = useCallback(async (track: Track) => {
+    if (!bridge?.online) return;
+    const url = `${bridge.base}/audio/${track.messageId}?token=${encodeURIComponent(bridge.token)}`;
+    try {
+      if (Platform.OS === 'windows') {
+        if (!NativeModules.TelopotifyAudio) throw new Error('Windows audio module is unavailable');
+        NativeModules.TelopotifyAudio.play(url);
+      } else {
+        await Linking.openURL(url);
+      }
+      endedHandled.current = false;
+      setPlayingTrackId(track.id);
+      setPaused(false);
+      setPlaybackStatus(Platform.OS === 'windows' ? 'opening' : 'playing');
+      setPosition(0);
+      setNativeDuration(0);
+    } catch (error) {
+      setConnectionStatus(error instanceof Error ? error.message : 'Playback failed');
+    }
+  }, [bridge]);
+
   useEffect(() => {
     if (Platform.OS !== 'windows' || !playingTrackId || !bridge?.online) return;
     const refresh = () => {
       try {
         const audio = NativeModules.TelopotifyAudio;
         const status = String(audio.getStatus());
+        if (status === 'ended' && !endedHandled.current) {
+          endedHandled.current = true;
+          const next = advanceAfterEnd(queue);
+          const target = next && tracks.find(track => track.id === currentTrackId(next));
+          if (next && target) {
+            setQueue(next);
+            playTrack(target);
+          } else {
+            audio.stop();
+            setPlayingTrackId(null);
+            setPlaybackStatus('stopped');
+            setPosition(0);
+          }
+          return;
+        }
         setPlaybackStatus(status);
         setPaused(status === 'paused');
         setPosition(Number(audio.getPosition()) || 0);
@@ -95,7 +134,7 @@ export default function App() {
     refresh();
     const timer = setInterval(refresh, 500);
     return () => clearInterval(timer);
-  }, [playingTrackId, bridge]);
+  }, [playingTrackId, bridge, queue, tracks, playTrack]);
 
   const loadLibrary = useCallback(async (connection: Bridge) => {
     const data = await bridgeRequest<LibraryResponse>(connection, '/library');
@@ -107,6 +146,7 @@ export default function App() {
     setTracks(library);
     setQueue(createQueue(library.map(track => track.id)));
     if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
+    endedHandled.current = false;
     setPlayingTrackId(null);
     setPaused(false);
     setPlaybackStatus('stopped');
@@ -218,6 +258,7 @@ export default function App() {
     try {
       await bridgeRequest(bridge, '/auth/logout', {});
       if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
+      endedHandled.current = false;
       setPlayingTrackId(null);
       setBridge({ ...bridge, online: false });
       setTracks([]);
@@ -232,26 +273,6 @@ export default function App() {
       setConnectionStatus('Signed out. Local session and catalog removed.');
     } catch (error) {
       setConnectionStatus(error instanceof Error ? error.message : 'Sign-out failed');
-    }
-  }
-
-  async function playTrack(track: Track) {
-    if (!bridge?.online) return;
-    const url = `${bridge.base}/audio/${track.messageId}?token=${encodeURIComponent(bridge.token)}`;
-    try {
-      if (Platform.OS === 'windows') {
-        if (!NativeModules.TelopotifyAudio) throw new Error('Windows audio module is unavailable');
-        NativeModules.TelopotifyAudio.play(url);
-      } else {
-        await Linking.openURL(url);
-      }
-      setPlayingTrackId(track.id);
-      setPaused(false);
-      setPlaybackStatus(Platform.OS === 'windows' ? 'opening' : 'playing');
-      setPosition(0);
-      setNativeDuration(0);
-    } catch (error) {
-      setConnectionStatus(error instanceof Error ? error.message : 'Playback failed');
     }
   }
 
@@ -273,6 +294,17 @@ export default function App() {
       const target = tracks.find(track => track.id === currentTrackId(changed));
       if (target && target.id !== playingTrackId) playTrack(target);
     }
+  }
+
+  function cycleRepeat() {
+    setQueue(current => ({ ...current, repeat: current.repeat === 'off' ? 'all' :
+      current.repeat === 'all' ? 'one' : 'off' }));
+  }
+
+  function changeVolume(value: number) {
+    const level = Math.max(0, Math.min(1, value));
+    setVolume(level);
+    if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.setVolume(level);
   }
 
   function seekTo(seconds: number) {
@@ -376,7 +408,10 @@ export default function App() {
             <Text numberOfLines={2} style={s.heroTitle}>{channelName || 'Your music'}</Text>
             <Text style={s.heroMeta}>{tracks.length.toLocaleString()} songs  ·  Stream without downloading your library</Text>
             <Pressable accessibilityRole="button" accessibilityLabel="Play library"
-              disabled={!online} onPress={() => { setQueue(createQueue(tracks.map(track => track.id), tracks[0].id)); playTrack(tracks[0]); }}
+              disabled={!online} onPress={() => {
+                setQueue(current => ({ ...createQueue(tracks.map(track => track.id), tracks[0].id), repeat: current.repeat }));
+                playTrack(tracks[0]);
+              }}
               style={[s.heroPlay, !online && s.heroPlayDisabled]}><Text style={s.heroPlayText}>▶   Play collection</Text></Pressable>
           </View>{wide && <View style={s.heroArt}><Text style={s.heroArtNote}>♫</Text></View>}
         </View>}
@@ -391,9 +426,9 @@ export default function App() {
           renderItem={({ item, index }) => <Pressable
             accessibilityRole="button" accessibilityLabel={`Play ${item.title}`}
             onPress={() => {
-              setQueue(page === 'library'
-                ? createQueue(tracks.map(track => track.id), item.id)
-                : { ...queue, currentIndex: index });
+              setQueue(current => page === 'library'
+                ? { ...createQueue(tracks.map(track => track.id), item.id), repeat: current.repeat }
+                : { ...current, currentIndex: index });
               playTrack(item);
             }}
             style={[s.row, selected?.id === item.id && s.selected]}>
@@ -421,6 +456,11 @@ export default function App() {
       </View>
       <View style={s.playerCenter}>
       <View style={s.transport}>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Repeat ${queue.repeat}`}
+          accessibilityHint="Cycles through off, all songs, and one song"
+          onPress={cycleRepeat} style={s.repeatButton}>
+          <Text style={[s.repeatText, queue.repeat !== 'off' && s.repeatActive]}>{queue.repeat === 'one' ? '↻₁' : '↻'}</Text>
+        </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Previous track"
           onPress={() => changeTrack('previous')} style={s.transportButton}>
           <Text style={s.transportText}>⏮</Text>
@@ -444,8 +484,15 @@ export default function App() {
         <Text style={s.time}>{clock(duration)}</Text>
       </View>
       </View>
-      {wide && <View style={s.playerRight}><Text style={s.playerRightLabel}>{playingTrackId === selected?.id ? playbackStatus.toUpperCase() : 'READY TO PLAY'}</Text>
-        <Text style={s.playerRightSub}>{online ? 'STREAMING FROM TELEGRAM' : 'WAITING FOR CONNECTION'}</Text></View>}
+      {wide && <View style={s.playerRight}>
+        <Text style={s.playerRightLabel}>{playingTrackId === selected?.id ? playbackStatus.toUpperCase() : 'READY TO PLAY'}</Text>
+        <View style={s.volumeRow}><Text style={s.volumeIcon}>{volume === 0 ? '♪' : '♫'}</Text>
+          <Pressable accessibilityRole="adjustable" accessibilityLabel="Volume"
+            accessibilityValue={{ min: 0, max: 100, now: Math.round(volume * 100) }}
+            onLayout={event => setVolumeWidth(event.nativeEvent.layout.width)}
+            onPress={event => changeVolume(event.nativeEvent.locationX / volumeWidth)}
+            style={s.volumeTrack}><View style={[s.volumeFill, { width: `${volume * 100}%` }]} /></Pressable>
+          <Text style={s.volumeValue}>{Math.round(volume * 100)}%</Text></View></View>}
     </View>
   </View>;
 }
@@ -570,11 +617,18 @@ const s = StyleSheet.create({
   time: { color: c.muted, fontSize: 10, width: 30 },
   transportButton: { paddingHorizontal: 17, paddingVertical: 9 },
   transportText: { color: c.muted, fontSize: 18 },
+  repeatButton: { position: 'absolute', left: 0, paddingHorizontal: 10, paddingVertical: 8 },
+  repeatText: { color: c.muted, fontSize: 22 },
+  repeatActive: { color: c.accent },
   disabledPlay: { width: 38, height: 38, borderRadius: 19, backgroundColor: c.raised,
     alignItems: 'center', justifyContent: 'center' },
   enabledPlay: { backgroundColor: c.accent },
   playText: { color: '#1b1730', fontSize: 17, fontWeight: '800' },
   playerRight: { flex: 1, alignItems: 'flex-end' },
   playerRightLabel: { color: c.text, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
-  playerRightSub: { color: c.muted, fontSize: 9, marginTop: 4, letterSpacing: 0.5 },
+  volumeRow: { width: 150, flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 10 },
+  volumeIcon: { color: c.muted, fontSize: 16 },
+  volumeTrack: { flex: 1, height: 5, backgroundColor: c.raised, borderRadius: 3 },
+  volumeFill: { height: 5, backgroundColor: c.accent, borderRadius: 3 },
+  volumeValue: { color: c.muted, fontSize: 10, width: 29, textAlign: 'right' },
 });

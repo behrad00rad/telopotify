@@ -25,6 +25,12 @@ export function nextTrack(queue: QueueState, automatic = false): QueueState {
   return queue.repeat === 'all' ? { ...queue, currentIndex: 0 } : queue;
 }
 
+export function advanceAfterEnd(queue: QueueState): QueueState | null {
+  if (!queue.trackIds.length) return null;
+  const next = nextTrack(queue, true);
+  return next === queue && queue.repeat === 'off' ? null : next;
+}
+
 export function previousTrack(queue: QueueState): QueueState {
   if (!queue.trackIds.length) return queue;
   if (queue.currentIndex > 0) return { ...queue, currentIndex: queue.currentIndex - 1 };
