@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { trackFromAudio, mergeTracks, searchTracks } from './library.ts';
 import { addToQueue, advanceAfterEnd, createQueue, currentTrackId, moveQueueTrack, nextTrack,
-  moveQueueTrackTo, playNextInQueue, previousTrack, removeFromQueue, shuffleUpcoming } from './queue.ts';
+  moveQueueTrackTo, playNextInQueue, previousTrack, removeFromQueue, shuffleUpcoming,
+  stepPlayableQueue } from './queue.ts';
 import { discoverTracks, fileType } from './discovery.ts';
 import { trackFromTdMessage } from './tdlibMessages.ts';
 
@@ -61,6 +62,14 @@ test('drag and shuffle keep the current song and shuffle only upcoming songs', (
   const moved = moveQueueTrackTo(shuffled, 'd', 0);
   assert.deepEqual(moved.trackIds, ['d', 'a', 'b', 'c']);
   assert.equal(currentTrackId(moved), 'b');
+});
+
+test('offline queue navigation skips unavailable songs', () => {
+  const queue = createQueue(['a', 'b', 'c', 'd'], 'a');
+  const available = new Set(['a', 'd']);
+  assert.equal(currentTrackId(stepPlayableQueue(queue, available, 'next')), 'd');
+  assert.equal(currentTrackId(stepPlayableQueue({ ...queue, currentIndex: 3 }, available, 'previous')), 'a');
+  assert.equal(stepPlayableQueue({ ...queue, currentIndex: 3 }, available, 'next', true), null);
 });
 
 test('discovery combines artist, duration, type, and sort', () => {

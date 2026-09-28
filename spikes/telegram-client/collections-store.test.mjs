@@ -7,12 +7,14 @@ import { CollectionsStore, emptyCollections, normalizeCollections } from './coll
 
 test('normalizes playlists, favorites, and a restorable queue', () => {
   const result = normalizeCollections({ favorites: ['7', '7', '8'], recentTrackIds: ['8', '7', '8'],
+    albumOverrides: { 7: '  Night Drive  ' },
     playlists: [{ id: 'mix-1', name: '  Road trip  ', trackIds: ['8', '7', '8'] }],
     queue: { trackIds: ['7', '8'], currentTrackId: '8', repeat: 'all' } });
   assert.deepEqual(result.favorites, ['7', '8']);
   assert.deepEqual(result.playlists[0], { id: 'mix-1', name: 'Road trip', trackIds: ['8', '7'] });
   assert.equal(result.queue.currentTrackId, '8');
   assert.deepEqual(result.recentTrackIds, ['8', '7']);
+  assert.deepEqual(result.albumOverrides, { 7: 'Night Drive' });
   assert.throws(() => normalizeCollections({ ...result, playlists: [{ id: 'bad', name: '', trackIds: [] }] }),
     /Invalid collections/);
 });

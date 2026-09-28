@@ -31,6 +31,19 @@ export function advanceAfterEnd(queue: QueueState): QueueState | null {
   return next === queue && queue.repeat === 'off' ? null : next;
 }
 
+export function stepPlayableQueue(queue: QueueState, available: Set<string>,
+  direction: 'next' | 'previous', automatic = false): QueueState | null {
+  if (automatic && queue.repeat === 'one' && available.has(currentTrackId(queue) ?? '')) return queue;
+  let cursor = queue;
+  for (let count = 0; count < queue.trackIds.length; count++) {
+    const next = direction === 'next' ? nextTrack(cursor, false) : previousTrack(cursor);
+    if (next === cursor) return automatic ? null : queue;
+    if (available.has(currentTrackId(next) ?? '')) return next;
+    cursor = next;
+  }
+  return automatic ? null : queue;
+}
+
 export function previousTrack(queue: QueueState): QueueState {
   if (!queue.trackIds.length) return queue;
   if (queue.currentIndex > 0) return { ...queue, currentIndex: queue.currentIndex - 1 };

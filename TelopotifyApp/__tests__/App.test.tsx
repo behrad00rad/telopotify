@@ -31,6 +31,7 @@ test('connects automatically to the local bridge and loads a selected channel', 
   const originalAudio = NativeModules.TelopotifyAudio;
   NativeModules.TelopotifyAudio = {
     play: jest.fn(), pause: jest.fn(), resume: jest.fn(), stop: jest.fn(),
+    setSpeed: jest.fn(), setNext: jest.fn(),
     getStatus: () => 'playing', getPosition: () => 0, getDuration: () => 120,
   };
   const openMock = jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined);
@@ -92,7 +93,7 @@ test('connects automatically to the local bridge and loads a selected channel', 
     });
     expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
     await ReactTestRenderer.act(async () => {
-      renderer.root.findByProps({ accessibilityLabel: 'Library' }).props.onPress();
+      renderer.root.findByProps({ accessibilityLabel: 'Tracks' }).props.onPress();
     });
     await ReactTestRenderer.act(async () => {
       renderer.root.findByProps({ accessibilityLabel: 'Duration: Any' }).props.onPress();
@@ -121,6 +122,43 @@ test('connects automatically to the local bridge and loads a selected channel', 
     });
     expect(cacheBytes).toBe(0);
     await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Open now playing' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Toggle playback from now playing' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Playback speed 1x' }).props.onPress();
+      renderer.root.findByProps({ accessibilityLabel: 'Sleep timer off' }).props.onPress();
+    });
+    expect(NativeModules.TelopotifyAudio.setSpeed).toHaveBeenCalledWith(1.25);
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Sleep timer 15 minutes remaining' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Artists' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Open Artist' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Albums' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Open Unsorted tracks' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Set album for Song' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Album name' }).props.onChangeText('Night Drive');
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Save album name' }).props.onPress();
+      renderer.root.findByProps({ accessibilityLabel: 'Back to groups' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Open Night Drive' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Tracks' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
       renderer.root.findByProps({ accessibilityLabel: 'Add favorite Song' }).props.onPress();
       renderer.root.findByProps({ accessibilityLabel: 'Playlists' }).props.onPress();
     });
@@ -129,7 +167,7 @@ test('connects automatically to the local bridge and loads a selected channel', 
     });
     await ReactTestRenderer.act(async () => {
       renderer.root.findByProps({ accessibilityLabel: 'Create playlist' }).props.onPress();
-      renderer.root.findByProps({ accessibilityLabel: 'Library' }).props.onPress();
+      renderer.root.findByProps({ accessibilityLabel: 'Tracks' }).props.onPress();
     });
     await ReactTestRenderer.act(async () => {
       renderer.root.findByProps({ accessibilityLabel: 'Add Song to playlist' }).props.onPress();
@@ -159,6 +197,8 @@ test('connects automatically to the local bridge and loads a selected channel', 
     expect(savedCollections.playlists).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: 'Mix', trackIds: ['7'] }),
     ]));
+    expect((savedCollections as typeof savedCollections & { albumOverrides: Record<string, string> })
+      .albumOverrides['7']).toBe('Night Drive');
     const playCalls = (NativeModules.TelopotifyAudio.play as jest.Mock).mock.calls.length;
     await ReactTestRenderer.act(async () => { renderer.unmount(); });
     await ReactTestRenderer.act(async () => { renderer = ReactTestRenderer.create(<App />); });
@@ -166,6 +206,10 @@ test('connects automatically to the local bridge and loads a selected channel', 
       renderer.root.findByProps({ accessibilityLabel: 'Favorites' }).props.onPress();
     });
     expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Albums' }).props.onPress();
+    });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Open Night Drive' })).toBeTruthy();
     await ReactTestRenderer.act(async () => {
       renderer.root.findByProps({ accessibilityLabel: 'Recent' }).props.onPress();
     });

@@ -4,15 +4,15 @@ import {
   TextInput, useWindowDimensions, View,
 } from 'react-native';
 import { searchTracks, type Track } from './src/core/library';
-import { advanceAfterEnd, createQueue, currentTrackId, moveQueueTrack,
-  moveQueueTrackTo, nextTrack, playNextInQueue, previousTrack, removeFromQueue,
+import { createQueue, currentTrackId, moveQueueTrack,
+  moveQueueTrackTo, playNextInQueue, removeFromQueue, stepPlayableQueue,
   shuffleUpcoming, type QueueState } from './src/core/queue';
 import { discoverTracks, fileType, type DurationFilter, type SortOrder } from './src/core/discovery';
 import { Icon, type IconName } from './src/components/Icon';
 
 const c = {
-  bg: '#0d111b', panel: '#151b29', raised: '#202a3b', line: '#2b3547',
-  text: '#f5f7fc', muted: '#9daabd', accent: '#b6a4ff', soft: '#cec5ff',
+  bg: '#080b10', panel: '#111720', raised: '#1c2633', line: '#28323d',
+  text: '#f5f6f4', muted: '#a1aab4', accent: '#ff9b46', soft: '#ffc18b',
 };
 
 const DISCOVERY_URL = 'http://127.0.0.1:43127/bootstrap';
@@ -24,7 +24,7 @@ function clock(seconds: number) {
 }
 
 function size(bytes: number) { return `${(bytes / 1_000_000).toFixed(1)} MB`; }
-const coverColors = ['#6c5ab8', '#356e8c', '#a25d83', '#457f75', '#9a6b54'];
+const coverColors = ['#173b58', '#24485d', '#514333', '#234b54', '#36495b'];
 function Cover({ track, large = false }: { track?: Track; large?: boolean }) {
   const index = track ? Number(track.messageId) % coverColors.length : 0;
   return <View style={[s.cover, large && s.coverLarge, { backgroundColor: coverColors[index] }]}>
@@ -37,8 +37,10 @@ type Bridge = { base: string; token: string; online: boolean };
 type BridgeStatus = { authenticated: boolean; online: boolean; step: string; error: string;
   channel: string; trackCount: number; selected: boolean; indexing: boolean;
   syncing: boolean; catalogRevision: number; lastSyncedAt: string | null; syncError: string;
-  cache: CacheStats; unavailableTrackIds: number[] };
+  cache: CacheStats; offline?: OfflineStats | null; unavailableTrackIds: number[] };
 type CacheStats = { bytes: number; limitBytes: number; chunks: number };
+type OfflineStats = { bytes: number; limitBytes: number; pinnedIds: string[];
+  job: { total: number; completed: number; currentId: string | null; error: string } | null };
 type ChannelChoice = { index: number; title: string; selected: boolean };
 type LibraryResponse = { channel: string; channelId: string | null; online: boolean; catalogRevision: number;
   unavailableTrackIds: number[]; tracks: Array<{
@@ -46,6 +48,7 @@ type LibraryResponse = { channel: string; channelId: string | null; online: bool
   fileSize: number; mimeType: string }> };
 type Playlist = { id: string; name: string; trackIds: string[] };
 type CollectionsResponse = { channelId: string; favorites: string[]; playlists: Playlist[]; recentTrackIds?: string[];
+  albumOverrides?: Record<string, string>;
   queue: { trackIds: string[]; currentTrackId: string | null; repeat: QueueState['repeat'] } };
 
 async function bridgeRequest<T>(connection: Bridge, path: string, data?: object): Promise<T> {
@@ -86,6 +89,12 @@ export default function App() {
   const [syncMessage, setSyncMessage] = useState('');
   const [syncError, setSyncError] = useState('');
   const [cache, setCache] = useState<CacheStats>({ bytes: 0, limitBytes: 32 * 1024 * 1024, chunks: 0 });
+  const [offline, setOffline] = useState<OfflineStats>({ bytes: 0, limitBytes: 512 * 1048576,
+    pinnedIds: [], job: null });
+  const [offlineError, setOfflineError] = useState('');
+  const [speed, setSpeed] = useState(1);
+  const [sleepUntil, setSleepUntil] = useState<number | null>(null);
+  const [sleepRemaining, setSleepRemaining] = useState(0);
   const [cacheBusy, setCacheBusy] = useState(false);
   const [unavailableTrackIds, setUnavailableTrackIds] = useState<Set<string>>(() => new Set());
   const [playbackNotice, setPlaybackNotice] = useState('');
@@ -98,10 +107,17 @@ export default function App() {
   const [volume, setVolume] = useState(1);
   const [volumeWidth, setVolumeWidth] = useState(1);
   const endedHandled = useRef(false);
-  const [page, setPage] = useState<'library' | 'favorites' | 'playlists' | 'queue' | 'recent'>('library');
+  const [page, setPage] = useState<'home' | 'library' | 'artists' | 'albums' |
+    'favorites' | 'playlists' | 'queue' | 'recent' | 'nowPlaying'>('home');
   const [queue, setQueue] = useState(() => createQueue([]));
   const [favorites, setFavorites] = useState<string[]>([]);
   const [recentTrackIds, setRecentTrackIds] = useState<string[]>([]);
+  const [albumOverrides, setAlbumOverrides] = useState<Record<string, string>>({});
+  const [activeArtist, setActiveArtist] = useState('');
+  const [activeAlbum, setActiveAlbum] = useState('');
+  const [groupQuery, setGroupQuery] = useState('');
+  const [albumEditTrackId, setAlbumEditTrackId] = useState('');
+  const [albumEditName, setAlbumEditName] = useState('');
   const [artistFilter, setArtistFilter] = useState('');
   const [durationFilter, setDurationFilter] = useState<DurationFilter>('any');
   const [typeFilter, setTypeFilter] = useState('All types');
@@ -120,23 +136,53 @@ export default function App() {
     duration: durationFilter, type: typeFilter, sort: sortOrder }),
     [visible, artistFilter, durationFilter, typeFilter, sortOrder]);
   const activePlaylist = playlists.find(item => item.id === activePlaylistId) ?? playlists[0];
+  const artistGroups = useMemo(() => {
+    const grouped = new Map<string, Track[]>();
+    for (const track of tracks) {
+      if (!grouped.has(track.artist)) grouped.set(track.artist, []);
+      grouped.get(track.artist)!.push(track);
+    }
+    return [...grouped.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [tracks]);
+  const albumGroups = useMemo(() => {
+    const grouped = new Map<string, Track[]>();
+    for (const track of tracks) {
+      const album = albumOverrides[track.id] || 'Unsorted tracks';
+      if (!grouped.has(album)) grouped.set(album, []);
+      grouped.get(album)!.push(track);
+    }
+    return [...grouped.entries()].sort((a, b) => a[0] === 'Unsorted tracks' ? 1 :
+      b[0] === 'Unsorted tracks' ? -1 : a[0].localeCompare(b[0]));
+  }, [tracks, albumOverrides]);
   const selected = tracks.find(track => track.id === currentTrackId(queue));
-  const playableTracks = useMemo(() => tracks.filter(track => !unavailableTrackIds.has(track.id)),
-    [tracks, unavailableTrackIds]);
+  const homeTrack = tracks.find(track => track.id === recentTrackIds[0]) ?? tracks[0];
+  const pinnedKey = offline.pinnedIds.join(',');
+  const pinnedIds = useMemo(() => new Set(pinnedKey ? pinnedKey.split(',') : []), [pinnedKey]);
+  const playableTracks = useMemo(() => tracks.filter(track =>
+    (pinnedIds.has(track.id) || !unavailableTrackIds.has(track.id)) &&
+    (bridge?.online || pinnedIds.has(track.id))),
+    [tracks, unavailableTrackIds, bridge?.online, pinnedIds]);
   const duration = nativeDuration || selected?.durationSeconds || 0;
-  const items = page === 'library' ? discovered : page === 'favorites' ?
+  const items = page === 'home' ? tracks.slice(0, 12) :
+    page === 'library' ? discovered : page === 'favorites' ?
     discovered.filter(track => favorites.includes(track.id)) :
     page === 'playlists' ? (activePlaylist?.trackIds ?? []).map(id => tracks.find(track => track.id === id)!).filter(Boolean) :
     page === 'recent' ? recentTrackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean) :
+    page === 'artists' ? activeArtist ? tracks.filter(track => track.artist === activeArtist) : [] :
+    page === 'albums' ? activeAlbum ? tracks.filter(track =>
+      (albumOverrides[track.id] || 'Unsorted tracks') === activeAlbum) : [] :
+    page === 'nowPlaying' ? queue.trackIds.slice(queue.currentIndex + 1)
+      .map(id => tracks.find(track => track.id === id)!).filter(Boolean) :
     queue.trackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean);
 
   const playTrack = useCallback(async (track: Track) => {
-    if (!bridge?.online) return;
+    if (!bridge || (!bridge.online && !pinnedIds.has(track.id))) return;
     const url = `${bridge.base}/audio/${track.messageId}?token=${encodeURIComponent(bridge.token)}`;
     try {
       if (Platform.OS === 'windows') {
         if (!NativeModules.TelopotifyAudio) throw new Error('Windows audio module is unavailable');
         NativeModules.TelopotifyAudio.play(url, track.title, track.artist);
+        NativeModules.TelopotifyAudio.setSpeed?.(speed);
       } else {
         await Linking.openURL(url);
       }
@@ -151,23 +197,42 @@ export default function App() {
     } catch (error) {
       setPlaybackNotice(error instanceof Error ? error.message : 'Playback failed');
     }
-  }, [bridge]);
+  }, [bridge, pinnedIds, speed]);
 
   useEffect(() => {
-    if (Platform.OS !== 'windows' || !playingTrackId || !bridge?.online) return;
+    if (Platform.OS !== 'windows' || !playingTrackId || !bridge) return;
     const refresh = () => {
       try {
         const audio = NativeModules.TelopotifyAudio;
+        const available = new Set(tracks.filter(track => (bridge.online || pinnedIds.has(track.id)) &&
+          (pinnedIds.has(track.id) || !unavailableTrackIds.has(track.id))).map(track => track.id));
         const command = Number(audio.takeMediaCommand?.() ?? 0);
+        if (command === 3) {
+          const changed = stepPlayableQueue(queue, available, 'next', true);
+          const target = changed && tracks.find(track => track.id === currentTrackId(changed));
+          if (changed && target) {
+            setQueue(changed);
+            setPlayingTrackId(target.id);
+            setRecentTrackIds(current => [target.id, ...current.filter(id => id !== target.id)].slice(0, 50));
+            setPosition(0);
+            setNativeDuration(0);
+            endedHandled.current = false;
+          } else {
+            audio.stop();
+            setPlayingTrackId(null);
+            setPlaybackStatus('stopped');
+          }
+          return;
+        }
         if (command === 1 || command === 2) {
-          const changed = command === 1 ? nextTrack(queue) : previousTrack(queue);
-          const target = tracks.find(track => track.id === currentTrackId(changed));
-          if (target && target.id !== playingTrackId) { setQueue(changed); playTrack(target); return; }
+          const changed = stepPlayableQueue(queue, available, command === 1 ? 'next' : 'previous');
+          const target = changed && tracks.find(track => track.id === currentTrackId(changed));
+          if (changed && target && target.id !== playingTrackId) { setQueue(changed); playTrack(target); return; }
         }
         const status = String(audio.getStatus());
         if (status === 'ended' && !endedHandled.current) {
           endedHandled.current = true;
-          const next = advanceAfterEnd(queue);
+          const next = stepPlayableQueue(queue, available, 'next', true);
           const target = next && tracks.find(track => track.id === currentTrackId(next));
           if (next && target) {
             setQueue(next);
@@ -191,7 +256,18 @@ export default function App() {
     refresh();
     const timer = setInterval(refresh, 500);
     return () => clearInterval(timer);
-  }, [playingTrackId, bridge, queue, tracks, playTrack]);
+  }, [playingTrackId, bridge, queue, tracks, playTrack, pinnedIds, unavailableTrackIds]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'windows' || !bridge || !playingTrackId ||
+        currentTrackId(queue) !== playingTrackId) return;
+    const available = new Set(tracks.filter(track => (bridge.online || pinnedIds.has(track.id)) &&
+      (pinnedIds.has(track.id) || !unavailableTrackIds.has(track.id))).map(track => track.id));
+    const next = queue.repeat === 'one' ? null : stepPlayableQueue(queue, available, 'next', true);
+    const target = next && tracks.find(track => track.id === currentTrackId(next));
+    const url = target ? `${bridge.base}/audio/${target.messageId}?token=${encodeURIComponent(bridge.token)}` : '';
+    NativeModules.TelopotifyAudio?.setNext?.(url, target?.title ?? '', target?.artist ?? '');
+  }, [queue, playingTrackId, bridge, tracks, pinnedIds, unavailableTrackIds]);
 
   const loadLibrary = useCallback(async (connection: Bridge) => {
     const data = await bridgeRequest<LibraryResponse>(connection, '/library');
@@ -208,7 +284,7 @@ export default function App() {
     setTracks(library);
     if (sameLibrary) {
       setQueue(current => {
-        const available = new Set(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id));
+        const available = new Set(library.filter(track => !unavailableIds.has(track.id) || pinnedIds.has(track.id)).map(track => track.id));
         const trackIds = current.trackIds.filter(id => available.has(id));
         const currentId = currentTrackId(current);
         return { ...current, trackIds, currentIndex: Math.max(0, trackIds.indexOf(currentId ?? '')) };
@@ -218,13 +294,14 @@ export default function App() {
       setCollectionError('');
       setFavorites([]);
       setRecentTrackIds([]);
+      setAlbumOverrides({});
       setArtistFilter('');
       setDurationFilter('any');
       setTypeFilter('All types');
       setSortOrder('newest');
       setPlaylists([]);
       setPlaylistPickerTrackId(null);
-      setQueue(createQueue(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id)));
+      setQueue(createQueue(library.filter(track => !unavailableIds.has(track.id) || pinnedIds.has(track.id)).map(track => track.id)));
       if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
       endedHandled.current = false;
       setPlayingTrackId(null);
@@ -246,10 +323,11 @@ export default function App() {
       try {
         const saved = await bridgeRequest<CollectionsResponse>(connection, '/collections');
         if (saved.channelId !== data.channelId) throw new Error('Collections belong to another channel');
-        const available = new Set(library.filter(track => !unavailableIds.has(track.id)).map(track => track.id));
+        const available = new Set(library.filter(track => !unavailableIds.has(track.id) || pinnedIds.has(track.id)).map(track => track.id));
         const trackIds = saved.queue.trackIds.filter(id => available.has(id));
         setFavorites(saved.favorites);
         setRecentTrackIds((saved.recentTrackIds ?? []).filter(id => library.some(track => track.id === id)));
+        setAlbumOverrides(saved.albumOverrides ?? {});
         setPlaylists(saved.playlists);
         setActivePlaylistId(saved.playlists[0]?.id ?? '');
         setRenamePlaylistName(saved.playlists[0]?.name ?? '');
@@ -260,12 +338,12 @@ export default function App() {
         setCollectionError(error instanceof Error ? error.message : 'Could not load collections');
       }
     }
-  }, []);
+  }, [pinnedIds]);
 
   useEffect(() => {
     if (!collectionsReady || !bridge || !loadedChannel.current) return;
     const channelId = loadedChannel.current;
-    const snapshot = { channelId, favorites, playlists, recentTrackIds,
+    const snapshot = { channelId, favorites, playlists, recentTrackIds, albumOverrides,
       queue: { trackIds: queue.trackIds, currentTrackId: currentTrackId(queue), repeat: queue.repeat } };
     const timer = setTimeout(() => {
       saveTail.current = saveTail.current.catch(() => {}).then(() =>
@@ -274,7 +352,7 @@ export default function App() {
         'Could not save collections'));
     }, 350);
     return () => clearTimeout(timer);
-  }, [bridge, collectionsReady, favorites, playlists, queue, recentTrackIds]);
+  }, [bridge, collectionsReady, favorites, playlists, queue, recentTrackIds, albumOverrides]);
 
   const loadChannels = useCallback(async (connection: Bridge) => {
     if (channelsFetched.current) return;
@@ -296,16 +374,19 @@ export default function App() {
     setSyncing(data.syncing);
     setSyncError(data.syncError || '');
     if (data.cache) setCache(data.cache);
+    if (data.offline) setOffline(current => JSON.stringify(current) === JSON.stringify(data.offline) ?
+      current : data.offline!);
+    const savedIds = new Set(data.offline?.pinnedIds ?? []);
     const missing = new Set((data.unavailableTrackIds ?? []).map(String));
     setUnavailableTrackIds(current => current.size === missing.size &&
       [...current].every(id => missing.has(id)) ? current : missing);
     if (missing.size) {
       setQueue(current => {
         let next = current;
-        for (const id of current.trackIds) if (missing.has(id)) next = removeFromQueue(next, id);
+        for (const id of current.trackIds) if (missing.has(id) && !savedIds.has(id)) next = removeFromQueue(next, id);
         return next;
       });
-      if (playingTrackId && missing.has(playingTrackId)) {
+      if (playingTrackId && missing.has(playingTrackId) && !savedIds.has(playingTrackId)) {
         if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
         setPlayingTrackId(null);
         setPlaybackStatus('stopped');
@@ -317,7 +398,7 @@ export default function App() {
       await loadLibrary(connection);
     }
     if (!data.online) {
-      if (lastOnline.current) {
+      if (lastOnline.current && (!playingTrackId || !savedIds.has(playingTrackId))) {
         if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.stop();
         endedHandled.current = false;
         setPlayingTrackId(null);
@@ -442,6 +523,39 @@ export default function App() {
     } finally { setCacheBusy(false); }
   }
 
+  async function pinSongs(songIds: string[]) {
+    if (!bridge || !bridge.online) return;
+    setOfflineError('');
+    try {
+      const result = await bridgeRequest<OfflineStats>(bridge, '/offline/pin', {
+        trackIds: songIds.map(Number),
+      });
+      setOffline(result);
+    } catch (error) { setOfflineError(error instanceof Error ? error.message : 'Could not save songs offline'); }
+  }
+
+  async function unpinSongs(songIds: string[]) {
+    if (!bridge) return;
+    setOfflineError('');
+    try {
+      setOffline(await bridgeRequest<OfflineStats>(bridge, '/offline/unpin', {
+        trackIds: songIds.map(String),
+      }));
+    } catch (error) { setOfflineError(error instanceof Error ? error.message : 'Could not remove offline songs'); }
+  }
+
+  async function cycleOfflineLimit() {
+    if (!bridge) return;
+    const limits = [128, 512, 1024, 2048];
+    const current = Math.round(offline.limitBytes / 1048576);
+    const next = limits[(limits.indexOf(current) + 1) % limits.length];
+    setOfflineError('');
+    try { setOffline(await bridgeRequest<OfflineStats>(bridge, '/offline/limit', {
+      limitBytes: next * 1048576,
+    })); }
+    catch (error) { setOfflineError(error instanceof Error ? error.message : 'Could not change storage limit'); }
+  }
+
   function toggleFavorite(trackId: string) {
     setFavorites(current => current.includes(trackId) ? current.filter(id => id !== trackId) :
       [...current, trackId]);
@@ -486,7 +600,7 @@ export default function App() {
   }
 
   function playSongs(songIds: string[], startId?: string, shuffle = false) {
-    if (!bridge?.online) return;
+    if (!bridge) return;
     const available = songIds.filter(id => playableTracks.some(track => track.id === id));
     const ordered = shuffle ? shuffleUpcoming({ ...createQueue(available), currentIndex: -1 }).trackIds : available;
     const first = ordered.find(id => id === startId) ?? ordered[0];
@@ -528,6 +642,7 @@ export default function App() {
       setCollectionsReady(false);
       setFavorites([]);
       setRecentTrackIds([]);
+      setAlbumOverrides({});
       setPlaylists([]);
       setActivePlaylistId('');
       setCollectionError('');
@@ -555,7 +670,7 @@ export default function App() {
   }
 
   async function togglePlayback() {
-    if (!selected || !bridge?.online) return;
+    if (!selected || !bridge || (!bridge.online && !pinnedIds.has(selected.id))) return;
     if (Platform.OS === 'windows' && playingTrackId === selected.id && (paused || showPause)) {
       if (paused) NativeModules.TelopotifyAudio.resume();
       else NativeModules.TelopotifyAudio.pause();
@@ -567,7 +682,8 @@ export default function App() {
   }
 
   function changeTrack(direction: 'next' | 'previous') {
-    const changed = direction === 'next' ? nextTrack(queue) : previousTrack(queue);
+    const changed = stepPlayableQueue(queue, new Set(playableTracks.map(track => track.id)), direction);
+    if (!changed) return;
     setQueue(changed);
     if (playingTrackId && bridge) {
       const target = tracks.find(track => track.id === currentTrackId(changed));
@@ -594,12 +710,58 @@ export default function App() {
     setPosition(target);
   }
 
+  function cycleSpeed() {
+    const rates = [1, 1.25, 1.5, 2, 0.75];
+    const next = rates[(rates.indexOf(speed) + 1) % rates.length];
+    setSpeed(next);
+    if (Platform.OS === 'windows') NativeModules.TelopotifyAudio?.setSpeed?.(next);
+  }
+
+  function cycleSleepTimer() {
+    const minutes = sleepUntil ? Math.ceil((sleepUntil - Date.now()) / 60000) : 0;
+    const next = minutes <= 0 ? 15 : minutes <= 15 ? 30 : minutes <= 30 ? 60 : 0;
+    setSleepUntil(next ? Date.now() + next * 60000 : null);
+    setSleepRemaining(next * 60);
+  }
+
+  function saveAlbumLabel() {
+    if (!albumEditTrackId) return;
+    const name = albumEditName.trim();
+    if (name.length > 100) { setCollectionError('Album names can be up to 100 characters.'); return; }
+    setAlbumOverrides(current => {
+      const next = { ...current };
+      if (name) next[albumEditTrackId] = name;
+      else delete next[albumEditTrackId];
+      return next;
+    });
+    setAlbumEditTrackId('');
+    setAlbumEditName('');
+  }
+
+  useEffect(() => {
+    if (!sleepUntil) return;
+    const timer = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((sleepUntil - Date.now()) / 1000));
+      setSleepRemaining(remaining);
+      if (remaining === 0) {
+        NativeModules.TelopotifyAudio?.pause?.();
+        setPaused(true);
+        setSleepUntil(null);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [sleepUntil]);
+
   const online = Boolean(bridge?.online);
+  const canPlay = online || pinnedIds.size > 0;
+  const offlineBusy = !!offline.job && !offline.job.error;
   const showPause = playingTrackId === selected?.id && !paused &&
     ['opening', 'buffering', 'playing'].includes(playbackStatus);
   const currentLabel = online ? 'Ready to stream' : bridge ? 'Telegram offline' :
     connectionStatus.startsWith('Unable') ? 'Connection issue' : 'Connecting';
-  const pageTitle = page === 'library' ? 'Your music' : page === 'favorites' ? 'Favorites' :
+  const pageTitle = page === 'home' ? 'Good listening' : page === 'library' ? 'All tracks' :
+    page === 'artists' ? activeArtist || 'Artists' : page === 'albums' ? activeAlbum || 'Albums' :
+    page === 'nowPlaying' ? 'Now playing' : page === 'favorites' ? 'Liked songs' :
     page === 'playlists' ? 'Playlists' : page === 'recent' ? 'Recently played' : 'Play queue';
 
   return <View style={s.root}>
@@ -608,20 +770,22 @@ export default function App() {
       {wide && <View style={s.sidebar}>
         <View style={s.brandRow}><View style={s.brandMark}><Icon name="music" size={22} color={c.bg} /></View>
           <View><Text style={s.brand}>telopotify</Text><Text style={s.brandTag}>TELEGRAM MUSIC</Text></View></View>
-        <Text style={s.navCaption}>YOUR SPACE</Text>
-        <Nav icon="library" label="Library" active={page === 'library'} onPress={() => setPage('library')} />
+        <Text style={s.navCaption}>DISCOVER</Text>
+        <Nav icon="home" label="Home" active={page === 'home'} onPress={() => setPage('home')} />
+        <Nav icon="library" label="Tracks" active={page === 'library'} onPress={() => setPage('library')} />
+        <Nav icon="artist" label="Artists" active={page === 'artists'} onPress={() => { setActiveArtist(''); setPage('artists'); }} />
+        <Nav icon="album" label="Albums" active={page === 'albums'} onPress={() => { setActiveAlbum(''); setPage('albums'); }} />
         <Nav icon="favorite" label="Favorites" active={page === 'favorites'} onPress={() => setPage('favorites')} />
         <Nav icon="playlist" label="Playlists" active={page === 'playlists'} onPress={() => setPage('playlists')} />
         <Nav icon="queue" label="Queue" active={page === 'queue'} onPress={() => setPage('queue')} />
         <Nav icon="recent" label="Recently played" active={page === 'recent'} onPress={() => setPage('recent')} />
+        <Nav icon="music" label="Now playing" active={page === 'nowPlaying'} onPress={() => setPage('nowPlaying')} />
         <View style={s.sidebarDivider} />
         <Text style={s.navCaption}>YOUR COLLECTION</Text>
         <View style={s.collectionCard}><View style={s.collectionIcon}><Icon name="music" size={18} /></View>
           <View style={s.trackText}><Text numberOfLines={1} style={s.collectionTitle}>{channelName || 'Telegram channel'}</Text>
             <Text style={s.collectionCount}>{tracks.length} songs</Text></View></View>
         <View style={s.sidebarBottom}>
-          {bridge && <CacheInfo stats={cache} busy={cacheBusy} onClear={clearCache} />}
-          <View style={s.sidebarDivider} />
           <View style={s.statusRow}><View style={[s.statusDot, !online && s.statusDotIdle]} />
             <Text style={s.statusText}>{currentLabel}</Text></View>
           <Text style={s.connection} numberOfLines={2}>{connectionStatus}</Text>
@@ -630,20 +794,33 @@ export default function App() {
       <View style={s.main}>
         {!wide && <View style={s.compactNav}>
           <Text style={s.compactBrand}>telopotify</Text>
-          <Nav icon="library" label="Library" active={page === 'library'} onPress={() => setPage('library')} />
+          <Nav icon="home" label="Home" active={page === 'home'} onPress={() => setPage('home')} />
+          <Nav icon="library" label="Tracks" active={page === 'library'} onPress={() => setPage('library')} />
+          <Nav icon="artist" label="Artists" active={page === 'artists'} onPress={() => { setActiveArtist(''); setPage('artists'); }} />
+          <Nav icon="album" label="Albums" active={page === 'albums'} onPress={() => { setActiveAlbum(''); setPage('albums'); }} />
           <Nav icon="favorite" label="Favorites" active={page === 'favorites'} onPress={() => setPage('favorites')} />
           <Nav icon="playlist" label="Playlists" active={page === 'playlists'} onPress={() => setPage('playlists')} />
           <Nav icon="queue" label="Queue" active={page === 'queue'} onPress={() => setPage('queue')} />
           <Nav icon="recent" label="Recent" active={page === 'recent'} onPress={() => setPage('recent')} />
+          <Nav icon="music" label="Playing" active={page === 'nowPlaying'} onPress={() => setPage('nowPlaying')} />
         </View>}
         <View style={s.topLine}><Text style={s.breadcrumb}>MY MUSIC  /  {page.toUpperCase()}</Text>
           <View style={s.topStatus}><View style={[s.statusDot, !online && s.statusDotIdle]} />
             <Text style={s.topStatusText}>{currentLabel}</Text></View></View>
         <Text style={s.heading}>{pageTitle}</Text>
-        <Text style={s.subtitle}>{page === 'library' ? 'Every song from your channel, ready when you are.' :
+        <Text style={s.subtitle}>{page === 'home' ? 'Your channel, arranged for the moment.' :
+          page === 'library' ? 'Every song from your channel, ready when you are.' :
+          page === 'artists' ? 'Browse by artist.' :
+          page === 'albums' ? 'Group songs into albums on this device.' :
+          page === 'nowPlaying' ? 'Stay with the music.' :
           page === 'favorites' ? 'The songs you keep coming back to.' :
           page === 'playlists' ? 'Build your own collections from the channel.' :
           'The songs lined up for your listening session.'}</Text>
+        {(page === 'artists' && activeArtist || page === 'albums' && activeAlbum) &&
+          <Pressable accessibilityRole="button" accessibilityLabel="Back to groups"
+            onPress={() => page === 'artists' ? setActiveArtist('') : setActiveAlbum('')}
+            style={s.backLink}><Icon name="previous" size={14} color={c.soft} />
+            <Text style={s.backLinkText}>All {page}</Text></Pressable>}
         {!bridge && <View style={s.setupPanel}>
           <Text style={s.setupTitle}>Finding your local library…</Text>
           <Text style={s.setupHelp}>{connectionStatus}</Text>
@@ -678,12 +855,17 @@ export default function App() {
           <Pressable accessibilityRole="button" accessibilityLabel="Sign out of Telegram"
             onPress={signOut}><Text style={s.accountAction}>Sign out</Text></Pressable>
         </View>}
-        {!wide && bridge && <View style={s.compactCache}><CacheInfo stats={cache} busy={cacheBusy} onClear={clearCache} /></View>}
+        {bridge && tracks.length > 0 && page === 'library' && <View style={s.storageRow}>
+          <View style={s.storageCell}><CacheInfo stats={cache} busy={cacheBusy} onClear={clearCache} /></View>
+          <View style={s.storageCell}><OfflineInfo stats={offline} error={offlineError}
+            onChangeLimit={cycleOfflineLimit} /></View>
+        </View>}
         {!!(playbackNotice || playbackStatus.startsWith('error:')) && <View style={s.playbackAlert}>
           <View style={s.alertCopy}><Text style={s.alertTitle}>Playback interrupted</Text>
             <Text style={s.alertDetail}>{playbackNotice || 'Could not stream this song. Check the connection and try again.'}</Text></View>
-          <Pressable accessibilityRole="button" accessibilityLabel="Retry playback" disabled={!online || !selected}
-            onPress={() => selected && playTrack(selected)} style={[s.alertAction, (!online || !selected) && s.syncButtonDisabled]}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Retry playback"
+            disabled={!selected || (!online && !pinnedIds.has(selected.id))}
+            onPress={() => selected && playTrack(selected)} style={s.alertAction}>
             <Icon name="sync" size={15} color={c.soft} /><Text style={s.alertActionText}>Retry</Text>
           </Pressable>
         </View>}
@@ -717,10 +899,21 @@ export default function App() {
               onPress={renamePlaylist} style={s.smallSecondary}><Icon name="playlist" size={15} color={c.soft} />
               <Text style={s.smallSecondaryText}>Rename</Text></Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Play playlist"
-              disabled={!activePlaylist.trackIds.length || !online}
+              disabled={!activePlaylist.trackIds.some(id => playableTracks.some(track => track.id === id))}
               onPress={() => playSongs(activePlaylist.trackIds)} style={[s.smallSecondary,
-                (!activePlaylist.trackIds.length || !online) && s.syncButtonDisabled]}>
+                !activePlaylist.trackIds.length && s.syncButtonDisabled]}>
               <Icon name="play" size={15} color={c.soft} /><Text style={s.smallSecondaryText}>Play</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Save playlist ${activePlaylist.name} offline`}
+              disabled={!online || offlineBusy || !activePlaylist.trackIds.some(id => !pinnedIds.has(id))}
+              onPress={() => pinSongs(activePlaylist.trackIds.filter(id => !pinnedIds.has(id)))}
+              style={[s.smallSecondary, (!online || offlineBusy) && s.syncButtonDisabled]}>
+              <Icon name="download" size={15} color={c.soft} /><Text style={s.smallSecondaryText}>Save offline</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Remove playlist ${activePlaylist.name} offline`}
+              disabled={offlineBusy || !activePlaylist.trackIds.some(id => pinnedIds.has(id))}
+              onPress={() => unpinSongs(activePlaylist.trackIds.filter(id => pinnedIds.has(id)))}
+              style={s.smallSecondary}><Icon name="remove" size={15} color={c.soft} />
+              <Text style={s.smallSecondaryText}>Remove downloads</Text></Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Delete playlist"
               onPress={deletePlaylist} style={s.smallDanger}><Icon name="delete" size={15} color="#ffc7d1" /></Pressable>
           </View>}
@@ -754,28 +947,88 @@ export default function App() {
           </ScrollView>
           {channelBusy && <Text style={s.setupHelp}>Indexing songs without downloading audio…</Text>}
         </View>}
-        {tracks.length > 0 && page === 'library' && <View style={s.hero}>
+        {tracks.length > 0 && page === 'home' && <View style={s.hero}>
           <View style={s.heroAccent} />
-          <View style={s.heroCopy}><Text style={s.heroEyebrow}>YOUR CHANNEL COLLECTION</Text>
-            <Text numberOfLines={2} style={s.heroTitle}>{channelName || 'Your music'}</Text>
-            <Text style={s.heroMeta}>{tracks.length.toLocaleString()} songs  ·  Stream without downloading your library</Text>
+          <View style={s.heroCopy}><Text style={s.heroEyebrow}>FEATURED FROM YOUR CHANNEL</Text>
+            <Text numberOfLines={2} style={s.heroTitle}>{homeTrack?.title || 'Your music'}</Text>
+            <Text numberOfLines={1} style={s.heroMeta}>{homeTrack?.artist} · {tracks.length.toLocaleString()} songs in your channel</Text>
             <Pressable accessibilityRole="button" accessibilityLabel="Play library"
-              disabled={!online || !discovered.some(track => !unavailableTrackIds.has(track.id))} onPress={() => {
-                playSongs(discovered.map(track => track.id));
-              }}
-              style={[s.heroPlay, (!online || !discovered.some(track => !unavailableTrackIds.has(track.id))) && s.heroPlayDisabled]}><Icon name="play" size={15} color="#1b1730" />
-              <Text style={s.heroPlayText}>Play collection</Text></Pressable>
+              disabled={!canPlay} onPress={() => homeTrack && playSongs(tracks.map(track => track.id), homeTrack.id)}
+              style={[s.heroPlay, !canPlay && s.heroPlayDisabled]}><Icon name="play" size={15} color={c.bg} />
+              <Text style={s.heroPlayText}>Listen now</Text></Pressable>
             <Pressable accessibilityRole="button" accessibilityLabel="Shuffle library"
-              disabled={!online || !discovered.some(track => !unavailableTrackIds.has(track.id))}
-              onPress={() => playSongs(discovered.map(track => track.id), undefined, true)} style={s.heroShuffle}>
+              disabled={!canPlay}
+              onPress={() => playSongs(tracks.map(track => track.id), undefined, true)} style={s.heroShuffle}>
               <Icon name="shuffle" size={15} color={c.soft} /><Text style={s.syncButtonText}>Shuffle collection</Text>
             </Pressable>
-          </View>{wide && <View style={s.heroArt}><View style={s.heroRecord}><View style={s.heroRecordInner}>
-            <Icon name="music" size={28} color={c.soft} /></View></View></View>}
+          </View>{wide && <View style={s.heroArt}><RecordArt track={homeTrack} /></View>}
         </View>}
+        {page === 'home' && artistGroups.length > 0 && <View style={s.homeShelf}>
+          <View style={s.shelfHeading}><Text style={s.section}>Explore artists</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="View all artists"
+              onPress={() => { setActiveArtist(''); setPage('artists'); }}>
+              <Text style={s.shelfLink}>View all</Text></Pressable></View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            {artistGroups.slice().sort((a, b) => b[1].length - a[1].length).slice(0, 6)
+              .map(([name, songs]) => <GroupCard key={name} icon="artist"
+              name={name} count={songs.length} track={songs[0]} onPress={() => {
+                setActiveArtist(name); setPage('artists');
+              }} />)}
+          </ScrollView>
+        </View>}
+        {page === 'nowPlaying' && <View style={[s.nowPage, !wide && s.nowPageCompact]}>
+          <RecordArt track={selected} large />
+          <View style={s.nowPageCopy}><Text style={s.heroEyebrow}>CURRENT TRACK</Text>
+            <Text numberOfLines={2} style={s.nowPageTitle}>{selected?.title ?? 'Nothing playing yet'}</Text>
+            <Text style={s.nowPageArtist}>{selected?.artist ?? 'Choose a song from your library'}</Text>
+            <View style={s.nowPageButtons}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Previous song from now playing"
+                onPress={() => changeTrack('previous')} style={s.transportButton}>
+                <Icon name="previous" size={22} color={c.text} /></Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="Toggle playback from now playing"
+                disabled={!selected} onPress={togglePlayback} style={s.heroPlay}>
+                <Icon name={showPause ? 'pause' : 'play'} size={23} color={c.bg} /></Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="Next song from now playing"
+                onPress={() => changeTrack('next')} style={s.transportButton}>
+                <Icon name="next" size={22} color={c.text} /></Pressable>
+            </View>
+            <View style={s.progressRow}><Text style={s.time}>{clock(position)}</Text>
+              <Pressable accessibilityRole="button" accessibilityLabel="Seek on now playing page"
+                onLayout={event => setProgressWidth(event.nativeEvent.layout.width)}
+                onPress={event => seekTo(duration * event.nativeEvent.locationX / progressWidth)}
+                style={s.progressTrack}><View style={[s.progressFill,
+                  { width: `${duration ? Math.min(100, position / duration * 100) : 0}%` }]} /></Pressable>
+              <Text style={s.time}>{clock(duration)}</Text></View>
+            <Text style={s.nowPageMeta}>{albumOverrides[selected?.id ?? ''] || 'Album not set'} · {speed}× speed</Text>
+          </View>
+        </View>}
+        {page === 'albums' && !!albumEditTrackId && <View style={s.playlistPanel}>
+          <Text style={s.panelEyebrow}>SET ALBUM FOR {tracks.find(track => track.id === albumEditTrackId)?.title.toUpperCase()}</Text>
+          <View style={s.playlistCreateRow}>
+            <TextInput accessibilityLabel="Album name" placeholder="Album name"
+              placeholderTextColor={c.muted} value={albumEditName} onChangeText={setAlbumEditName}
+              maxLength={100} style={[s.search, s.playlistInput]} />
+            <Pressable accessibilityRole="button" accessibilityLabel="Save album name" onPress={saveAlbumLabel}
+              style={s.smallPrimary}><Text style={s.smallPrimaryText}>Save</Text></Pressable>
+          </View>
+          <Text style={s.panelHelp}>Leave blank to move this song back to Unsorted tracks.</Text>
+        </View>}
+        {(page === 'artists' && !activeArtist || page === 'albums' && !activeAlbum) ?
+          <><TextInput accessibilityLabel={`Search ${page}`} placeholder={`Search ${page}`}
+            placeholderTextColor={c.muted} value={groupQuery} onChangeText={setGroupQuery}
+            style={[s.search, s.groupSearch]} />
+          <FlatList data={(page === 'artists' ? artistGroups : albumGroups)
+            .filter(([name]) => name.toLocaleLowerCase().includes(groupQuery.trim().toLocaleLowerCase()))}
+            keyExtractor={item => item[0]} renderItem={({ item }) => <GroupRow
+              icon={page === 'artists' ? 'artist' : 'album'} name={item[0]} count={item[1].length}
+              track={item[1][0]} onPress={() => page === 'artists' ?
+                setActiveArtist(item[0]) : setActiveAlbum(item[0])} />}
+            ListEmptyComponent={<Text style={s.empty}>No matching {page} yet.</Text>} /></> : <>
         <View style={[s.toolbar, !wide && s.toolbarCompact]}><View><Text style={s.section}>{page === 'library' ? 'All songs' :
           page === 'favorites' ? 'Liked songs' : page === 'playlists' ? activePlaylist?.name ?? 'Playlist songs' :
-          page === 'recent' ? 'Your latest listens' : 'Up next'}</Text>
+          page === 'recent' ? 'Your latest listens' : page === 'home' ? 'Fresh from your channel' :
+          page === 'nowPlaying' ? 'Coming up' : page === 'artists' ? 'Songs by this artist' :
+          page === 'albums' ? 'Album tracks' : 'Up next'}</Text>
           <Text style={s.sectionSub}>{items.length.toLocaleString()} tracks{(page === 'library' || page === 'favorites') && query ? ' found' : ''}{syncError ? ' · Sync will retry when Telegram is available.' : syncMessage ? ` · ${syncMessage}` : ''}</Text></View>
           <View style={[s.toolbarActions, !wide && s.toolbarActionsCompact]}>
             {page === 'library' && <Pressable accessibilityRole="button" accessibilityLabel="Sync new songs"
@@ -784,14 +1037,14 @@ export default function App() {
               <Icon name="sync" size={15} color={c.soft} /><Text style={s.syncButtonText}>{syncBusy || syncing ? 'Syncing' : 'Sync'}</Text>
             </Pressable>}
             {(page === 'favorites' || page === 'playlists' || page === 'recent') && !!items.length && <Pressable
-              accessibilityRole="button" accessibilityLabel="Play all shown songs" disabled={!online}
+              accessibilityRole="button" accessibilityLabel="Play all shown songs" disabled={!canPlay}
               onPress={() => playSongs(items.map(track => track.id))}
-              style={[s.syncButton, !online && s.syncButtonDisabled]}><Icon name="play" size={15} color={c.soft} />
+              style={[s.syncButton, !canPlay && s.syncButtonDisabled]}><Icon name="play" size={15} color={c.soft} />
               <Text style={s.syncButtonText}>Play all</Text></Pressable>}
             {(page === 'favorites' || page === 'playlists' || page === 'recent') && !!items.length && <Pressable
-              accessibilityRole="button" accessibilityLabel="Shuffle shown songs" disabled={!online}
+              accessibilityRole="button" accessibilityLabel="Shuffle shown songs" disabled={!canPlay}
               onPress={() => playSongs(items.map(track => track.id), undefined, true)}
-              style={[s.syncButton, !online && s.syncButtonDisabled]}><Icon name="shuffle" size={15} color={c.soft} />
+              style={[s.syncButton, !canPlay && s.syncButtonDisabled]}><Icon name="shuffle" size={15} color={c.soft} />
               <Text style={s.syncButtonText}>Shuffle</Text></Pressable>}
             {page === 'queue' && queue.trackIds.length > 2 && <Pressable accessibilityRole="button"
               accessibilityLabel="Shuffle upcoming songs" onPress={() => setQueue(current => shuffleUpcoming(current))}
@@ -824,8 +1077,8 @@ export default function App() {
           renderItem={({ item, index }) => <View
             style={[s.row, selected?.id === item.id && s.selected, unavailableTrackIds.has(item.id) && s.unavailableRow]}>
             <Pressable accessibilityRole="button"
-              accessibilityLabel={unavailableTrackIds.has(item.id) ? `${item.title} unavailable` : `Play ${item.title}`}
-              disabled={unavailableTrackIds.has(item.id)}
+              accessibilityLabel={unavailableTrackIds.has(item.id) && !pinnedIds.has(item.id) ? `${item.title} unavailable` : `Play ${item.title}`}
+              disabled={!playableTracks.some(track => track.id === item.id)}
               onPress={() => {
                 if (page === 'queue') {
                   setQueue(current => ({ ...current, currentIndex: current.trackIds.indexOf(item.id) }));
@@ -837,7 +1090,8 @@ export default function App() {
               <Cover track={item} />
               <View style={s.trackText}>
                 <Text numberOfLines={1} style={[s.trackTitle, selected?.id === item.id && s.activeRowText]}>{item.title}</Text>
-                <Text numberOfLines={1} style={s.trackArtist}>{item.artist}{unavailableTrackIds.has(item.id) ? ' · Unavailable' : ''}</Text>
+                <Text numberOfLines={1} style={s.trackArtist}>{item.artist}{pinnedIds.has(item.id) ? ' · Offline' :
+                  unavailableTrackIds.has(item.id) ? ' · Unavailable' : ''}</Text>
               </View>
             </Pressable>
             {wide && <Text style={s.rowSize}>{size(item.fileSize)}</Text>}
@@ -852,7 +1106,14 @@ export default function App() {
               {page === 'playlists' && activePlaylist && <RowAction icon="remove"
                 label={`Remove ${item.title} from playlist`} onPress={() => togglePlaylistTrack(activePlaylist.id, item.id)} />}
               {page !== 'queue' && <RowAction icon="add" label={`Play ${item.title} next`}
-                disabled={unavailableTrackIds.has(item.id)} onPress={() => setQueue(current => playNextInQueue(current, item.id))} />}
+                disabled={!playableTracks.some(track => track.id === item.id)} onPress={() => setQueue(current => playNextInQueue(current, item.id))} />}
+              {page !== 'queue' && <RowAction icon={pinnedIds.has(item.id) ? 'offline' : 'download'}
+                label={`${pinnedIds.has(item.id) ? 'Remove' : 'Save'} ${item.title} offline`}
+                disabled={offlineBusy || (!online && !pinnedIds.has(item.id))}
+                active={pinnedIds.has(item.id)} onPress={() => pinnedIds.has(item.id) ?
+                  unpinSongs([item.id]) : pinSongs([item.id])} />}
+              {page === 'albums' && <RowAction icon="album" label={`Set album for ${item.title}`}
+                onPress={() => { setAlbumEditTrackId(item.id); setAlbumEditName(albumOverrides[item.id] ?? ''); }} />}
               {page === 'queue' && <>
                 <QueueDragHandle trackId={item.id} index={index} onDrop={destination =>
                   setQueue(current => moveQueueTrackTo(current, item.id, destination))} />
@@ -875,17 +1136,52 @@ export default function App() {
               page === 'playlists' ? 'Add songs using the playlist icon in your library.' :
               page === 'queue' ? 'Add songs from your library or a playlist.' :
               page === 'recent' ? 'Songs you play will show up here.' :
-              (page === 'library' && tracks.length || page === 'favorites' && favorites.length) ?
+              page === 'library' && tracks.length ?
                 'Try changing the search or filters.' : connectionStatus}</Text></View>} />
+        </>}
       </View>
+      {wide && width >= 1120 && page !== 'nowPlaying' && <View style={s.rightRail}>
+        <View style={s.railHeading}><Text style={s.railTitle}>Now playing</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open full now playing page"
+            onPress={() => setPage('nowPlaying')}><Icon name="expand" size={17} color={c.soft} /></Pressable></View>
+        <Pressable accessibilityRole="button" accessibilityLabel="Open now playing details"
+          onPress={() => setPage('nowPlaying')} style={s.railArt}><RecordArt track={selected} /></Pressable>
+        <Text numberOfLines={2} style={s.railSong}>{selected?.title || 'Choose a song'}</Text>
+        <Text numberOfLines={1} style={s.railArtist}>{selected?.artist || channelName || 'Your music'}</Text>
+        <View style={s.railDivider} />
+        <View style={s.railHeading}><Text style={s.railTitle}>Up next</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Open queue"
+            onPress={() => setPage('queue')}><Text style={s.shelfLink}>View all</Text></Pressable></View>
+        <ScrollView style={s.railQueue}>
+          {queue.trackIds.slice(queue.currentIndex + 1, queue.currentIndex + 10)
+            .map(id => tracks.find(track => track.id === id)).filter((track): track is Track => !!track)
+            .map(track => <Pressable key={track.id} accessibilityRole="button"
+              accessibilityLabel={`Play upcoming ${track.title}`}
+              onPress={() => { setQueue(current => ({ ...current,
+                currentIndex: current.trackIds.indexOf(track.id) })); playTrack(track); }}
+              style={s.railQueueRow}><Cover track={track} />
+              <View style={s.trackText}><Text numberOfLines={1} style={s.trackTitle}>{track.title}</Text>
+                <Text numberOfLines={1} style={s.trackArtist}>{track.artist}</Text></View></Pressable>)}
+        </ScrollView>
+      </View>}
     </View>
     <View style={[s.playerBar, !wide && s.playerBarCompact]}>
       <View style={s.nowPlaying}>
-        <Cover track={selected} large />
-        <View style={s.trackText}>
-          <Text numberOfLines={1} style={s.playerTitle}>{selected?.title ?? 'Choose a song'}</Text>
-          <Text numberOfLines={1} style={s.trackArtist}>{selected?.artist || 'Your channel music will appear here'}</Text>
-        </View>
+        <Pressable accessibilityRole="button" accessibilityLabel="Open now playing"
+          onPress={() => setPage('nowPlaying')} style={s.nowPlayingLink}>
+          <Cover track={selected} large />
+          <View style={s.trackText}>
+            <Text numberOfLines={1} style={s.playerTitle}>{selected?.title ?? 'Choose a song'}</Text>
+            <Text numberOfLines={1} style={s.trackArtist}>{selected?.artist || 'Your channel music will appear here'}</Text>
+          </View>
+        </Pressable>
+        {selected && <View style={s.stickyActions}>
+          <RowAction icon={favorites.includes(selected.id) ? 'favoriteFilled' : 'favorite'}
+            label={`${favorites.includes(selected.id) ? 'Remove' : 'Add'} current song favorite`}
+            active={favorites.includes(selected.id)} onPress={() => toggleFavorite(selected.id)} />
+          <RowAction icon="playlist" label="Add current song to playlist"
+            onPress={() => { setPlaylistPickerTrackId(selected.id); setPage('playlists'); }} />
+        </View>}
       </View>
       <View style={s.playerCenter}>
       <View style={s.transport}>
@@ -900,13 +1196,21 @@ export default function App() {
           <Icon name="previous" size={20} color={c.muted} />
         </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={showPause ? 'Pause selected song' : 'Play selected song'}
-          onPress={togglePlayback} disabled={!bridge?.online || !selected}
-          style={[s.disabledPlay, online && s.enabledPlay]}><Icon name={showPause ? 'pause' : 'play'}
-            size={20} color={online ? '#1b1730' : c.muted} /></Pressable>
+          onPress={togglePlayback} disabled={!selected || (!online && !pinnedIds.has(selected.id))}
+          style={[s.disabledPlay, canPlay && s.enabledPlay]}><Icon name={showPause ? 'pause' : 'play'}
+            size={20} color={canPlay ? c.bg : c.muted} /></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Next track"
           onPress={() => changeTrack('next')} style={s.transportButton}>
           <Icon name="next" size={20} color={c.muted} />
         </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Playback speed ${speed}x`}
+          onPress={cycleSpeed} style={s.extraControl}><Icon name="speed" size={16} color={c.muted} />
+          <Text style={s.extraControlText}>{speed}×</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel={sleepUntil ?
+          `Sleep timer ${Math.ceil(sleepRemaining / 60)} minutes remaining` : 'Sleep timer off'}
+          onPress={cycleSleepTimer} style={s.extraControl}><Icon name="timer" size={16}
+            color={sleepUntil ? c.accent : c.muted} />
+          <Text style={s.extraControlText}>{sleepUntil ? `${Math.ceil(sleepRemaining / 60)}m` : 'Off'}</Text></Pressable>
       </View>
       <View style={s.progressRow}>
         <Text style={s.time}>{clock(position)}</Text>
@@ -947,6 +1251,51 @@ function FilterChip({ label, onPress }: { label: string; onPress: () => void }) 
   </Pressable>;
 }
 
+function RecordArt({ track, large = false, compact = false }:
+  { track?: Track; large?: boolean; compact?: boolean }) {
+  const index = track ? track.messageId % coverColors.length : 0;
+  const variant = track ? track.messageId % 4 : 0;
+  const letter = track?.title?.slice(0, 1).toUpperCase() || 'T';
+  return <View style={[s.recordArt, large && s.recordArtLarge, compact && s.recordArtCompact,
+    { backgroundColor: coverColors[index] }]}>
+    {variant === 0 ? <View style={[s.recordCircle, large && s.recordCircleLarge,
+      compact && s.recordCircleCompact]}><View style={[s.recordRing, large && s.recordRingLarge,
+      compact && s.recordRingCompact]}>
+      <Text style={[s.recordLetter, large && s.recordLetterLarge, compact && s.recordLetterCompact]}>{letter}</Text>
+    </View></View> : variant === 1 ? <View style={s.artBars}>
+      <View style={s.artBarTall} /><View style={s.artBarShort} /><View style={s.artBarTall} />
+      <Text style={[s.artInitial, large && s.recordLetterLarge]}>{letter}</Text>
+    </View> : variant === 2 ? <View style={s.artFrame}>
+      <View style={s.artFrameInner}><Text style={[s.artInitial, large && s.recordLetterLarge]}>{letter}</Text></View>
+    </View> : <View style={s.artOrbit}>
+      <View style={s.artOrbitDot} /><Text style={[s.artInitial, large && s.recordLetterLarge]}>{letter}</Text>
+    </View>}
+    <View style={s.recordStripe} />
+  </View>;
+}
+
+function GroupCard({ icon, name, count, track, onPress }:
+  { icon: IconName; name: string; count: number; track?: Track; onPress: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={`Open ${name}`}
+    onPress={onPress} style={s.groupCard}>
+    <View style={s.groupCardArt}><RecordArt track={track} compact /></View>
+    <Text numberOfLines={1} style={s.groupCardTitle}>{name}</Text>
+    <View style={s.groupCardMeta}><Icon name={icon} size={13} color={c.muted} />
+      <Text style={s.groupCardCount}>{count} songs</Text></View>
+  </Pressable>;
+}
+
+function GroupRow({ icon, name, count, track, onPress }:
+  { icon: IconName; name: string; count: number; track?: Track; onPress: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={`Open ${name}`}
+    onPress={onPress} style={s.groupRow}>
+    <Cover track={track} large />
+    <View style={s.trackText}><Text numberOfLines={1} style={s.groupRowTitle}>{name}</Text>
+      <Text style={s.groupCardCount}>{count} {count === 1 ? 'song' : 'songs'}</Text></View>
+    <Icon name={icon} size={17} color={c.muted} />
+  </Pressable>;
+}
+
 function QueueDragHandle({ trackId, index, onDrop }:
   { trackId: string; index: number; onDrop: (destination: number) => void }) {
   const offset = useRef(new Animated.Value(0)).current;
@@ -982,6 +1331,27 @@ function CacheInfo({ stats, busy, onClear }: { stats: CacheStats; busy: boolean;
   </View>;
 }
 
+function OfflineInfo({ stats, error, onChangeLimit }: {
+  stats: OfflineStats; error: string; onChangeLimit: () => void;
+}) {
+  const used = (stats.bytes / 1048576).toFixed(1);
+  const limit = Math.round(stats.limitBytes / 1048576);
+  return <View style={s.offlineCard}>
+    <View style={s.cacheHeader}><View style={s.offlineHeading}>
+      <Icon name="download" size={16} color={c.accent} />
+      <Text style={s.cacheTitle}>OFFLINE SONGS</Text></View>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Offline storage limit ${limit} MB`}
+        onPress={onChangeLimit} disabled={!!stats.job && !stats.job.error}>
+        <Text style={s.cacheClear}>Limit {limit} MB</Text></Pressable></View>
+    <Text style={s.cacheValue}>{used} MB <Text style={s.cacheLimit}>/ {limit} MB · {stats.pinnedIds.length} songs</Text></Text>
+    <View style={s.cacheMeter}><View style={[s.cacheMeterFill,
+      { width: `${stats.limitBytes ? Math.min(100, stats.bytes / stats.limitBytes * 100) : 0}%` }]} /></View>
+    {!!stats.job && <Text style={s.cacheHint}>{stats.job.error ||
+      `Saving ${stats.job.completed + 1} of ${stats.job.total}…`}</Text>}
+    {!!error && <Text style={s.authError}>{error}</Text>}
+  </View>;
+}
+
 function Nav({ icon, label, active, onPress }: { icon: IconName; label: string; active: boolean; onPress: () => void }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: active }}
     onPress={onPress} style={[s.nav, active && s.navActive]}>
@@ -993,20 +1363,25 @@ function Nav({ icon, label, active, onPress }: { icon: IconName; label: string; 
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: c.bg },
   body: { flex: 1, flexDirection: 'row' },
-  sidebar: { width: 246, padding: 20, backgroundColor: c.panel, borderRightWidth: 1, borderColor: c.line },
-  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 46 },
-  brandMark: { width: 37, height: 37, borderRadius: 12, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center' },
+  sidebar: { width: 218, padding: 18, backgroundColor: '#0c1118', borderRightWidth: 1, borderColor: c.line },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 38 },
+  brandMark: { width: 37, height: 37, borderRadius: 10, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center' },
   brand: { color: c.text, fontSize: 21, fontWeight: '800', letterSpacing: -0.7 },
   brandTag: { color: c.muted, fontSize: 8, fontWeight: '800', letterSpacing: 1.3, marginTop: 1 },
   navCaption: { color: '#708098', fontSize: 10, fontWeight: '800', letterSpacing: 1.6, marginBottom: 12, paddingHorizontal: 12 },
   sidebarDivider: { height: 1, backgroundColor: c.line, marginVertical: 22 },
   collectionCard: { flexDirection: 'row', alignItems: 'center', padding: 10, borderRadius: 10, backgroundColor: c.raised },
-  collectionIcon: { width: 34, height: 34, borderRadius: 7, backgroundColor: '#6c5ab8', alignItems: 'center', justifyContent: 'center', marginRight: 9 },
+  collectionIcon: { width: 34, height: 34, borderRadius: 7, backgroundColor: '#24485d', alignItems: 'center', justifyContent: 'center', marginRight: 9 },
   collectionTitle: { color: c.text, fontSize: 12, fontWeight: '700' },
   collectionCount: { color: c.muted, fontSize: 11, marginTop: 3 },
   sidebarBottom: { marginTop: 'auto' },
   cacheCard: { backgroundColor: c.raised, borderRadius: 11, padding: 12, borderWidth: 1, borderColor: c.line },
+  offlineCard: { backgroundColor: c.panel, borderRadius: 11, padding: 12, marginBottom: 14,
+    borderWidth: 1, borderColor: c.line },
+  offlineHeading: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   compactCache: { marginBottom: 16 },
+  storageRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 15 },
+  storageCell: { flexGrow: 1, flexBasis: 190 },
   cacheHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cacheTitle: { color: c.muted, fontSize: 9, fontWeight: '800', letterSpacing: 1.1 },
   cacheClear: { color: c.soft, fontSize: 11, fontWeight: '700' },
@@ -1022,21 +1397,22 @@ const s = StyleSheet.create({
   statusDotIdle: { backgroundColor: '#e8b873' },
   statusText: { color: c.text, fontSize: 12, fontWeight: '700' },
   nav: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 15, borderRadius: 9, marginBottom: 5, gap: 13 },
-  navActive: { backgroundColor: '#2a2545' },
+  navActive: { backgroundColor: '#20303c', borderLeftWidth: 3, borderLeftColor: c.accent },
   navText: { color: c.muted, fontSize: 14, fontWeight: '600' },
   navTextActive: { color: c.text },
   compactNav: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginBottom: 17, gap: 4 },
   compactBrand: { color: c.text, fontSize: 17, fontWeight: '800', width: '100%', marginBottom: 8 },
-  main: { flex: 1, paddingHorizontal: 30, paddingTop: 26, paddingBottom: 10 },
+  main: { flex: 1, paddingHorizontal: 26, paddingTop: 24, paddingBottom: 10 },
   topLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   breadcrumb: { color: c.accent, fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
   topStatus: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: c.panel,
     borderWidth: 1, borderColor: c.line, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 20 },
   topStatusText: { color: c.muted, fontSize: 11, fontWeight: '600' },
-  heading: { color: c.text, fontSize: 33, fontWeight: '800', letterSpacing: -1.2 },
+  heading: { color: c.text, fontSize: 32, fontWeight: '800', letterSpacing: -1.1 },
   subtitle: { color: c.muted, fontSize: 13, marginTop: 5, marginBottom: 20 },
   search: { width: 260, backgroundColor: c.panel, borderColor: c.line, borderWidth: 1, borderRadius: 9,
     color: c.text, paddingHorizontal: 14, paddingVertical: 8, fontSize: 12 },
+  groupSearch: { width: '100%', marginBottom: 14 },
   connectRow: { flexDirection: 'row', gap: 10 },
   connectInput: { flex: 1 },
   connectButton: { height: 42, paddingHorizontal: 18, borderRadius: 9, backgroundColor: c.accent,
@@ -1078,7 +1454,7 @@ const s = StyleSheet.create({
   playlistTab: { flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 8,
     paddingHorizontal: 11, height: 34, backgroundColor: c.raised, borderWidth: 1,
     borderColor: c.line, marginRight: 7, maxWidth: 200 },
-  playlistTabActive: { backgroundColor: '#342d57', borderColor: '#6b5e9d' },
+  playlistTabActive: { backgroundColor: '#3b3228', borderColor: c.accent },
   playlistTabText: { color: c.text, fontSize: 11, fontWeight: '700', flexShrink: 1 },
   playlistTabCount: { color: c.muted, fontSize: 10 },
   playlistEditRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 12, flexWrap: 'wrap' },
@@ -1089,24 +1465,72 @@ const s = StyleSheet.create({
   channelList: { maxHeight: 180 },
   channelItem: { paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: c.line },
   channelText: { color: c.text, fontSize: 13 },
-  hero: { minHeight: 184, backgroundColor: '#282445', borderRadius: 16, marginBottom: 24,
-    overflow: 'hidden', flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#443c70' },
+  hero: { minHeight: 194, backgroundColor: '#152a38', borderRadius: 18, marginBottom: 24,
+    overflow: 'hidden', flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#294354' },
   heroAccent: { width: 6, alignSelf: 'stretch', backgroundColor: c.accent },
-  heroCopy: { flex: 1, paddingVertical: 24, paddingLeft: 26, paddingRight: 8 },
+  heroCopy: { flex: 1, paddingVertical: 22, paddingLeft: 26, paddingRight: 8 },
   heroEyebrow: { color: c.soft, fontSize: 10, fontWeight: '800', letterSpacing: 1.5, marginBottom: 8 },
-  heroTitle: { color: c.text, fontSize: 26, fontWeight: '800', letterSpacing: -0.8 },
-  heroMeta: { color: '#cbc6e5', fontSize: 12, marginTop: 6, marginBottom: 16 },
+  heroTitle: { color: c.text, fontSize: 28, fontWeight: '800', letterSpacing: -0.9 },
+  heroMeta: { color: '#b4c0c9', fontSize: 12, marginTop: 6, marginBottom: 16 },
   heroPlay: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 7,
     backgroundColor: c.accent, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 9 },
   heroPlayDisabled: { opacity: 0.5 },
-  heroPlayText: { color: '#1b1730', fontSize: 12, fontWeight: '800' },
+  heroPlayText: { color: c.bg, fontSize: 12, fontWeight: '800' },
   heroShuffle: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 10,
     paddingHorizontal: 8, paddingVertical: 5 },
-  heroArt: { width: 150, alignItems: 'center', justifyContent: 'center' },
-  heroRecord: { width: 126, height: 126, borderRadius: 63, backgroundColor: '#17172c',
-    borderWidth: 8, borderColor: '#3d3765', alignItems: 'center', justifyContent: 'center' },
-  heroRecordInner: { width: 62, height: 62, borderRadius: 31, backgroundColor: '#6554aa',
-    borderWidth: 7, borderColor: '#8270bb', alignItems: 'center', justifyContent: 'center' },
+  heroArt: { width: 184, alignItems: 'center', justifyContent: 'center', marginRight: 16 },
+  recordArt: { width: 164, height: 164, borderRadius: 12, overflow: 'hidden',
+    justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#ffffff24' },
+  recordArtLarge: { width: 240, height: 240, borderRadius: 15 },
+  recordArtCompact: { width: 134, height: 104, borderRadius: 8 },
+  recordCircle: { width: 126, height: 126, borderRadius: 63, backgroundColor: '#0b141f',
+    justifyContent: 'center', alignItems: 'center', borderWidth: 8, borderColor: '#182b3a' },
+  recordCircleLarge: { width: 192, height: 192, borderRadius: 96 },
+  recordCircleCompact: { width: 94, height: 94, borderRadius: 47, borderWidth: 5 },
+  recordRing: { width: 67, height: 67, borderRadius: 34, backgroundColor: '#213a48',
+    borderWidth: 9, borderColor: '#334b56', justifyContent: 'center', alignItems: 'center' },
+  recordRingLarge: { width: 104, height: 104, borderRadius: 52 },
+  recordRingCompact: { width: 50, height: 50, borderRadius: 25, borderWidth: 6 },
+  recordLetter: { color: c.soft, fontSize: 27, fontWeight: '900' },
+  recordLetterLarge: { fontSize: 44 },
+  recordLetterCompact: { fontSize: 19 },
+  artBars: { height: '100%', width: '100%', flexDirection: 'row', alignItems: 'flex-end',
+    justifyContent: 'space-around', paddingHorizontal: 16, overflow: 'hidden' },
+  artBarTall: { width: 18, height: '86%', backgroundColor: '#7b9a9a66', transform: [{ rotate: '18deg' }] },
+  artBarShort: { width: 18, height: '55%', backgroundColor: '#ffb86a88', transform: [{ rotate: '18deg' }] },
+  artInitial: { position: 'absolute', alignSelf: 'center', top: '28%', color: '#f6f5ee',
+    fontSize: 29, fontWeight: '900' },
+  artFrame: { width: '76%', height: '76%', borderWidth: 2, borderColor: '#b8c7cb99',
+    transform: [{ rotate: '-12deg' }], justifyContent: 'center', alignItems: 'center' },
+  artFrameInner: { width: '72%', height: '72%', borderWidth: 2, borderColor: '#ffb86a99',
+    justifyContent: 'center', alignItems: 'center' },
+  artOrbit: { width: '75%', height: '75%', borderRadius: 100, borderWidth: 3,
+    borderColor: '#c2d4cf88', justifyContent: 'center', alignItems: 'center' },
+  artOrbitDot: { position: 'absolute', top: 8, right: 4, width: 13, height: 13,
+    borderRadius: 7, backgroundColor: c.accent },
+  recordStripe: { position: 'absolute', right: 0, bottom: 0, width: 54, height: 6, backgroundColor: c.accent },
+  homeShelf: { marginBottom: 22 },
+  shelfHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  shelfLink: { color: c.soft, fontSize: 12, fontWeight: '700' },
+  groupCard: { width: 156, marginRight: 12, padding: 10, backgroundColor: c.panel,
+    borderColor: c.line, borderWidth: 1, borderRadius: 12 },
+  groupCardArt: { width: 134, height: 104, overflow: 'hidden', borderRadius: 8 },
+  groupCardTitle: { color: c.text, fontSize: 12, fontWeight: '800', marginTop: 10 },
+  groupCardMeta: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 },
+  groupCardCount: { color: c.muted, fontSize: 10, marginTop: 3 },
+  groupRow: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, marginBottom: 6,
+    backgroundColor: c.panel, borderRadius: 10, borderWidth: 1, borderColor: c.line },
+  groupRowTitle: { color: c.text, fontSize: 14, fontWeight: '700' },
+  backLink: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', marginBottom: 12 },
+  backLinkText: { color: c.soft, fontSize: 12, fontWeight: '700' },
+  nowPage: { flexDirection: 'row', gap: 28, alignItems: 'center', padding: 24, marginBottom: 24,
+    borderRadius: 18, backgroundColor: '#14212d', borderWidth: 1, borderColor: '#294354' },
+  nowPageCompact: { flexDirection: 'column', alignItems: 'stretch' },
+  nowPageCopy: { flex: 1 },
+  nowPageTitle: { color: c.text, fontSize: 28, fontWeight: '800', marginBottom: 6 },
+  nowPageArtist: { color: c.muted, fontSize: 15, marginBottom: 17 },
+  nowPageButtons: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
+  nowPageMeta: { color: c.muted, fontSize: 11, marginTop: 12 },
   toolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
   toolbarCompact: { flexWrap: 'wrap', gap: 12 },
   toolbarActions: { flexDirection: 'row', alignItems: 'center', gap: 9 },
@@ -1141,7 +1565,7 @@ const s = StyleSheet.create({
   dragHandle: { width: 30, height: 32, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
   rowAction: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 7 },
   rowActionDisabled: { opacity: 0.35 },
-  selected: { backgroundColor: '#27283f' },
+  selected: { backgroundColor: '#24313a' },
   unavailableRow: { opacity: 0.45 },
   activeRowText: { color: c.soft },
   rowNumber: { color: c.muted, width: 22, fontSize: 11 },
@@ -1161,6 +1585,8 @@ const s = StyleSheet.create({
     borderColor: c.line, flexDirection: 'row', alignItems: 'center' },
   playerBarCompact: { height: 145, flexDirection: 'column', alignItems: 'stretch', paddingVertical: 10 },
   nowPlaying: { flex: 1, flexDirection: 'row', alignItems: 'center', minWidth: 0 },
+  nowPlayingLink: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center' },
+  stickyActions: { flexDirection: 'row', marginLeft: 4 },
   playerTitle: { color: c.text, fontSize: 13, fontWeight: '700' },
   playerCenter: { flex: 1.2 },
   transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 48 },
@@ -1169,11 +1595,22 @@ const s = StyleSheet.create({
   progressFill: { height: 5, backgroundColor: c.accent, borderRadius: 3 },
   time: { color: c.muted, fontSize: 10, width: 30 },
   transportButton: { paddingHorizontal: 17, paddingVertical: 9 },
+  extraControl: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 8, paddingVertical: 9 },
+  extraControlText: { color: c.muted, fontSize: 11, fontWeight: '700' },
   repeatButton: { position: 'absolute', left: 0, paddingHorizontal: 10, paddingVertical: 8 },
   disabledPlay: { width: 46, height: 46, borderRadius: 23, backgroundColor: c.raised,
     alignItems: 'center', justifyContent: 'center' },
   enabledPlay: { backgroundColor: c.accent },
   playerRight: { flex: 1, alignItems: 'flex-end' },
+  rightRail: { width: 250, padding: 17, backgroundColor: '#10151c', borderLeftWidth: 1, borderColor: c.line },
+  railHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
+  railTitle: { color: c.text, fontSize: 15, fontWeight: '800' },
+  railArt: { alignSelf: 'center', marginBottom: 13 },
+  railSong: { color: c.text, fontSize: 15, fontWeight: '800' },
+  railArtist: { color: c.muted, fontSize: 11, marginTop: 4 },
+  railDivider: { height: 1, backgroundColor: c.line, marginVertical: 20 },
+  railQueue: { flex: 1 },
+  railQueueRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 5, gap: 2 },
   playerRightLabel: { color: c.text, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
   volumeRow: { width: 150, flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 10 },
   volumeTrack: { flex: 1, height: 5, backgroundColor: c.raised, borderRadius: 3 },

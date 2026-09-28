@@ -8,6 +8,7 @@ import { parseRange } from '../range-stream/range.mjs';
 import { CHUNK_BYTES, fetchTelegramChunk, isStaleFileReference } from './chunks.mjs';
 import { AudioRangeCache, cacheLimitFromEnv } from './audio-cache.mjs';
 import { CollectionsStore } from './collections-store.mjs';
+import { OfflineStore } from './offline-store.mjs';
 import { mergeRecentTracks, parseLibraryCache } from './library-cache.mjs';
 import { createAuthFlow } from './auth-flow.mjs';
 import { readSession, removeSession, saveSession } from './session-store.mjs';
@@ -21,6 +22,7 @@ const SESSION_PATH = resolve(DATA_DIR, 'telegram.session');
 const CONNECTION_PATH = resolve(DATA_DIR, 'bridge-connection.json');
 const LIBRARY_CACHE_PATH = resolve(DATA_DIR, 'bridge-library.json');
 const COLLECTIONS_PATH = resolve(DATA_DIR, 'collections.json');
+const OFFLINE_DIR = resolve(DATA_DIR, 'offline');
 const MAX_MESSAGES = 2000;
 const SYNC_BATCH = 100;
 const SYNC_INTERVAL_MS = 60_000;
@@ -28,6 +30,7 @@ const BRIDGE_PORT = 43127;
 const token = randomBytes(24).toString('hex');
 const audioCache = new AudioRangeCache(cacheLimitFromEnv(process.env.TELOPOTIFY_CACHE_MB));
 const collectionsStore = new CollectionsStore(COLLECTIONS_PATH);
+const offlineStore = new OfflineStore(OFFLINE_DIR);
 
 let client = null;
 let authFlow = null;
@@ -269,7 +272,8 @@ function status() {
     step: initializing || reconnecting ? 'connecting' : authenticated ? 'authorized' : flow?.step ?? 'phone',
     error: flow?.error ?? '', channel, trackCount: tracks.length,
     selected: Boolean(selectedDialog), indexing, syncing, catalogRevision,
-    lastSyncedAt, syncError, cache: audioCache.stats(), unavailableTrackIds: [...unavailable],
+    lastSyncedAt, syncError, cache: audioCache.stats(), offline: selectedChannelId ?
+      offlineStore.status(selectedChannelId) : null, unavailableTrackIds: [...unavailable],
   };
 }
 
@@ -310,6 +314,7 @@ async function logout() {
     removeSession(SESSION_PATH),
     unlink(LIBRARY_CACHE_PATH).catch(error => { if (error.code !== 'ENOENT') throw error; }),
     collectionsStore.clear(),
+    offlineStore.clear(),
   ]);
 }
 
@@ -380,6 +385,48 @@ async function handle(request, response) {
       audioCache.clear();
       return json(response, 200, audioCache.stats());
     }
+    if (url.pathname === '/offline' && request.method === 'GET') {
+      if (!selectedChannelId) return json(response, 409, { error: 'Choose a channel first' });
+      return json(response, 200, offlineStore.status(selectedChannelId));
+    }
+    if (url.pathname === '/offline/limit' && request.method === 'POST') {
+      const { limitBytes } = await bodyOf(request);
+      await offlineStore.setLimit(limitBytes);
+      return json(response, 200, offlineStore.status(selectedChannelId));
+    }
+    if (url.pathname === '/offline/pin' && request.method === 'POST') {
+      if (!authenticated || !selectedDialog || !client || !selectedChannelId) {
+        return json(response, 409, { error: 'Connect to Telegram before saving songs' });
+      }
+      const { trackIds } = await bodyOf(request);
+      if (!Array.isArray(trackIds) || trackIds.length < 1 || trackIds.length > 2000 ||
+          trackIds.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+        return json(response, 400, { error: 'Choose 1–2000 valid songs' });
+      }
+      const chosen = trackIds.map(id => tracks.find(track => track.messageId === id));
+      if (chosen.some(track => !track)) return json(response, 404, { error: 'Song not found' });
+      const pinChannel = selectedChannelId;
+      const pinDialog = selectedDialog;
+      const pinClient = client;
+      const result = await offlineStore.pin(pinChannel, chosen, async (track, offset, length) => {
+        let message = selectedChannelId === pinChannel ? messages.get(track.messageId) : null;
+        if (!message) message = (await pinClient.getMessages(pinDialog.inputEntity, { ids: track.messageId }))[0];
+        if (!message || !songFromMessage(message)) throw new Error('Song is no longer available');
+        try { return await fetchTelegramChunk(pinClient, message, offset, length); }
+        catch (error) {
+          if (!isStaleFileReference(error)) throw error;
+          const fresh = (await pinClient.getMessages(pinDialog.inputEntity, { ids: track.messageId }))[0];
+          if (!fresh || !songFromMessage(fresh)) throw new Error('Song is no longer available');
+          return fetchTelegramChunk(pinClient, fresh, offset, length);
+        }
+      });
+      return json(response, 202, result);
+    }
+    if (url.pathname === '/offline/unpin' && request.method === 'POST') {
+      if (!selectedChannelId) return json(response, 409, { error: 'Choose a channel first' });
+      const { trackIds } = await bodyOf(request);
+      return json(response, 200, await offlineStore.unpin(selectedChannelId, trackIds));
+    }
     if (url.pathname === '/collections' && request.method === 'GET') {
       if (!selectedChannelId) return json(response, 409, { error: 'Choose a channel first' });
       return json(response, 200, { channelId: selectedChannelId, ...collectionsStore.get(selectedChannelId) });
@@ -392,25 +439,12 @@ async function handle(request, response) {
     }
     const match = /^\/audio\/(\d+)$/.exec(url.pathname);
     if (!match) return json(response, 404, { error: 'Not found' });
-    if (!authenticated || !selectedDialog || !client) {
-      return json(response, 503, { error: 'Sign in and select a channel to stream' });
-    }
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return json(response, 405, { error: 'Method not allowed' });
     }
     const id = Number(match[1]);
     const track = tracks.find(item => item.messageId === id);
     if (!track) return json(response, 404, { error: 'Song not found' });
-    if (unavailable.has(id)) return json(response, 404, { error: 'Song is no longer available' });
-    let message = messages.get(id);
-    if (!message) {
-      message = (await client.getMessages(selectedDialog.inputEntity, { ids: id }))[0];
-      if (!message || !songFromMessage(message)) {
-        markUnavailable(id);
-        return json(response, 404, { error: 'Song is no longer available' });
-      }
-      messages.set(id, message);
-    }
     const parsed = parseRange(request.headers.range, track.fileSize);
     if (!parsed) {
       response.writeHead(416, { 'Content-Range': `bytes */${track.fileSize}` });
@@ -425,9 +459,27 @@ async function handle(request, response) {
       'Content-Type': track.mimeType,
       'Cache-Control': 'no-store',
     };
-    if (request.method === 'HEAD') {
-      response.writeHead(206, headers);
-      return response.end();
+    const pinned = selectedChannelId && offlineStore.get(selectedChannelId, id);
+    if (pinned) {
+      if (request.method === 'HEAD') { response.writeHead(206, headers); return response.end(); }
+      const stream = offlineStore.stream(selectedChannelId, id, parsed.start, end);
+      response.writeHead(206, { ...headers, 'X-Telopotify-Offline': 'hit' });
+      stream.on('error', () => response.destroy());
+      return stream.pipe(response);
+    }
+    if (!authenticated || !selectedDialog || !client?.connected) {
+      return json(response, 503, { error: 'Connect to Telegram or pin this song for offline playback' });
+    }
+    if (unavailable.has(id)) return json(response, 404, { error: 'Song is no longer available' });
+    if (request.method === 'HEAD') { response.writeHead(206, headers); return response.end(); }
+    let message = messages.get(id);
+    if (!message) {
+      message = (await client.getMessages(selectedDialog.inputEntity, { ids: id }))[0];
+      if (!message || !songFromMessage(message)) {
+        markUnavailable(id);
+        return json(response, 404, { error: 'Song is no longer available' });
+      }
+      messages.set(id, message);
     }
     const cacheKey = `${selectedChannelId}:${id}`;
     const cached = audioCache.get(cacheKey, parsed.start, length);
@@ -457,7 +509,7 @@ async function handle(request, response) {
   } catch (error) {
     if (!response.headersSent && !response.destroyed) {
       const userError = error instanceof SyntaxError ? 'Invalid JSON' : error.message;
-      const statusCode = /Sign in|not active|already|Select|JSON|large|phone number|requested|Invalid collections|Invalid channel/.test(userError) ? 400 : 502;
+      const statusCode = /Sign in|not active|already|Select|JSON|large|phone number|requested|Invalid collections|Invalid channel|offline|Storage limit|Choose|Wait for/.test(userError) ? 400 : 502;
       json(response, statusCode, { error: userError });
     } else response.destroy();
     if (request.url?.startsWith('/audio/')) console.error(`Audio request failed: ${error.message}`);
@@ -467,6 +519,7 @@ async function handle(request, response) {
 async function main() {
   await mkdir(DATA_DIR, { recursive: true });
   await collectionsStore.load().catch(() => console.warn('Saved collections are unavailable.'));
+  await offlineStore.load().catch(() => console.warn('Saved offline songs are unavailable.'));
   const server = createServer(handle);
   await new Promise((done, reject) => {
     server.once('error', reject);

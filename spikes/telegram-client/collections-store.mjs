@@ -1,7 +1,7 @@
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 
 export function emptyCollections() {
-  return { favorites: [], playlists: [], recentTrackIds: [],
+  return { favorites: [], playlists: [], recentTrackIds: [], albumOverrides: {},
     queue: { trackIds: [], currentTrackId: null, repeat: 'off' } };
 }
 
@@ -39,7 +39,18 @@ export function normalizeCollections(value) {
   const trackIds = ids(queue.trackIds);
   const currentTrackId = trackIds.includes(queue.currentTrackId) ? queue.currentTrackId : trackIds[0] ?? null;
   const recentTrackIds = ids(value.recentTrackIds ?? []).slice(0, 50);
-  return { favorites, playlists, recentTrackIds,
+  const rawAlbums = value.albumOverrides ?? {};
+  if (!rawAlbums || typeof rawAlbums !== 'object' || Array.isArray(rawAlbums) ||
+      Object.keys(rawAlbums).length > 2000) throw new Error('Invalid collections');
+  const albumOverrides = {};
+  for (const [id, album] of Object.entries(rawAlbums)) {
+    ids([id]);
+    if (typeof album !== 'string' || !album.trim() || album.trim().length > 100) {
+      throw new Error('Invalid collections');
+    }
+    albumOverrides[id] = album.trim();
+  }
+  return { favorites, playlists, recentTrackIds, albumOverrides,
     queue: { trackIds, currentTrackId, repeat: queue.repeat } };
 }
 
