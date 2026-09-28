@@ -1,0 +1,48 @@
+name: iOS build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simulator-build:
+    name: Compile iOS app
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: TelopotifyApp/package-lock.json
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - name: Install JavaScript dependencies
+        run: npm ci --prefix TelopotifyApp
+      - name: Install CocoaPods
+        run: |
+          bundle install --gemfile=TelopotifyApp/Gemfile
+          cd TelopotifyApp/ios
+          bundle exec pod install
+      - name: Compile for iOS Simulator without signing
+        run: |
+          xcodebuild \
+            -workspace TelopotifyApp/ios/TelopotifyApp.xcworkspace \
+            -scheme TelopotifyApp \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/telopotify-ios" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
