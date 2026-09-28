@@ -157,8 +157,8 @@ final class TelopotifyTelegram: RCTEventEmitter {
   }
 
   @objc(selectChannel:resolver:rejecter:)
-  func selectChannel(_ id: String, resolver resolve: RCTPromiseResolveBlock,
-                     rejecter reject: RCTPromiseRejectBlock) {
+  func selectChannel(_ id: String, resolver resolve: @escaping RCTPromiseResolveBlock,
+                     rejecter reject: @escaping RCTPromiseRejectBlock) {
     guard let chatId = Int64(id) else { reject("telegram", "Invalid channel", nil); return }
     request(["@type": "getChat", "chat_id": chatId]) { result in
       guard let type = result["type"] as? [String: Any],
@@ -176,6 +176,54 @@ final class TelopotifyTelegram: RCTEventEmitter {
   func getSelectedChannel(_ resolve: RCTPromiseResolveBlock,
                           rejecter reject: RCTPromiseRejectBlock) {
     resolve(UserDefaults.standard.string(forKey: "telopotify.channelId"))
+  }
+
+  @objc(getTrackPage:resolver:rejecter:)
+  func getTrackPage(_ cursor: String, resolver resolve: @escaping RCTPromiseResolveBlock,
+                    rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard state == "authorizationStateReady",
+          let selected = UserDefaults.standard.string(forKey: "telopotify.channelId"),
+          let chatId = Int64(selected) else {
+      reject("telegram", "Choose a channel first", nil)
+      return
+    }
+    guard cursor.isEmpty || Int64(cursor) != nil else {
+      reject("telegram", "Invalid history cursor", nil)
+      return
+    }
+    request([
+      "@type": "getChatHistory", "chat_id": chatId,
+      "from_message_id": Int64(cursor) ?? 0, "offset": cursor.isEmpty ? 0 : 1,
+      "limit": 100, "only_local": false,
+    ]) { result in
+      guard let messages = result["messages"] as? [[String: Any]] else {
+        reject("telegram", result["message"] as? String ?? "Could not read channel", nil)
+        return
+      }
+      let tracks: [[String: Any]] = messages.compactMap { message in
+        guard let id = message["id"] as? NSNumber,
+              let content = message["content"] as? [String: Any],
+              content["@type"] as? String == "messageAudio",
+              let audio = content["audio"] as? [String: Any],
+              let file = audio["audio"] as? [String: Any],
+              let fileId = file["id"] as? NSNumber else { return nil }
+        let fileName = audio["file_name"] as? String ?? ""
+        let title = audio["title"] as? String ?? ""
+        return [
+          "messageId": id.stringValue, "fileId": fileId.intValue,
+          "title": title.isEmpty ? fileName : title,
+          "artist": audio["performer"] as? String ?? "",
+          "durationSeconds": audio["duration"] as? Int ?? 0,
+          "fileSize": file["size"] as? Int ?? 0,
+          "mimeType": audio["mime_type"] as? String ?? "",
+        ]
+      }
+      resolve([
+        "tracks": tracks,
+        "nextCursor": messages.last.flatMap { ($0["id"] as? NSNumber)?.stringValue } ?? "",
+        "hasMore": !messages.isEmpty,
+      ])
+    }
   }
 
   private func finish(_ result: [String: Any], resolve: RCTPromiseResolveBlock,
