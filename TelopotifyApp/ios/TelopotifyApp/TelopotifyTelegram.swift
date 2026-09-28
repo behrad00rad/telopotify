@@ -1,6 +1,8 @@
 import Foundation
+import Network
 import React
 import TDLibKit
+import UIKit
 
 private struct TelegramQuery: TdQuery {
   let body: [String: Any]
@@ -19,10 +21,28 @@ final class TelopotifyTelegram: RCTEventEmitter {
   private var client: TDLibClient?
   private var state = "starting"
   private var listeners = false
+  private let pathMonitor = NWPathMonitor()
+  private let pathQueue = DispatchQueue(label: "app.telopotify.network")
+  private var foregroundObserver: NSObjectProtocol?
 
   override init() {
     super.init()
     Self.active = self
+    pathMonitor.pathUpdateHandler = { [weak self] _ in self?.refreshNetwork() }
+    pathMonitor.start(queue: pathQueue)
+    foregroundObserver = NotificationCenter.default.addObserver(
+      forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil
+    ) { [weak self] _ in self?.refreshNetwork() }
+  }
+
+  deinit {
+    pathMonitor.cancel()
+    if let foregroundObserver { NotificationCenter.default.removeObserver(foregroundObserver) }
+  }
+
+  private func refreshNetwork() {
+    guard client != nil else { return }
+    request(["@type": "setNetworkType", "type": ["@type": "networkTypeOther"]]) { _ in }
   }
 
   @objc override static func requiresMainQueueSetup() -> Bool { false }
@@ -92,6 +112,7 @@ final class TelopotifyTelegram: RCTEventEmitter {
   func start(_ resolve: RCTPromiseResolveBlock, rejecter reject: RCTPromiseRejectBlock) {
     if client == nil {
       client = manager.createClient { [weak self] data, _ in self?.handleUpdate(data) }
+      refreshNetwork()
     }
     resolve(["state": state])
   }
@@ -199,14 +220,16 @@ final class TelopotifyTelegram: RCTEventEmitter {
     }
     request([
       "@type": "getChatHistory", "chat_id": chatId,
-      "from_message_id": Int64(cursor) ?? 0, "offset": cursor.isEmpty ? 0 : 1,
+      "from_message_id": Int64(cursor) ?? 0, "offset": 0,
       "limit": 100, "only_local": false,
     ]) { result in
       guard let messages = result["messages"] as? [[String: Any]] else {
         reject("telegram", result["message"] as? String ?? "Could not read channel", nil)
         return
       }
-      let tracks: [[String: Any]] = messages.compactMap { message in
+      let tracks: [[String: Any]] = messages.filter {
+        cursor.isEmpty || ($0["id"] as? NSNumber)?.stringValue != cursor
+      }.compactMap { message in
         guard let id = message["id"] as? NSNumber,
               let content = message["content"] as? [String: Any],
               content["@type"] as? String == "messageAudio",
@@ -236,6 +259,53 @@ final class TelopotifyTelegram: RCTEventEmitter {
         "nextCursor": messages.last.flatMap { ($0["id"] as? NSNumber)?.stringValue } ?? "",
         "hasMore": !messages.isEmpty,
       ])
+    }
+  }
+
+  private func catalogURL(_ channelId: String) -> URL? {
+    guard Int64(channelId) != nil else { return nil }
+    let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    return support.appendingPathComponent("Catalog-\(channelId).json")
+  }
+
+  @objc(getCatalog:resolver:rejecter:)
+  func getCatalog(_ channelId: String, resolver resolve: RCTPromiseResolveBlock,
+                  rejecter reject: RCTPromiseRejectBlock) {
+    guard let url = catalogURL(channelId) else { reject("catalog", "Invalid channel", nil); return }
+    resolve((try? String(contentsOf: url, encoding: .utf8)) ?? "")
+  }
+
+  @objc(saveCatalog:value:resolver:rejecter:)
+  func saveCatalog(_ channelId: String, value: String, resolver resolve: RCTPromiseResolveBlock,
+                   rejecter reject: RCTPromiseRejectBlock) {
+    guard let url = catalogURL(channelId), value.utf8.count < 10_000_000,
+          (try? JSONSerialization.jsonObject(with: Data(value.utf8))) is [String: Any] else {
+      reject("catalog", "Invalid catalog", nil)
+      return
+    }
+    do {
+      try Data(value.utf8).write(to: url, options: .atomic)
+      resolve(true)
+    } catch { reject("catalog", error.localizedDescription, error as NSError) }
+  }
+
+  @objc(reconnect:rejecter:)
+  func reconnect(_ resolve: @escaping RCTPromiseResolveBlock,
+                 rejecter reject: @escaping RCTPromiseRejectBlock) {
+    request(["@type": "setNetworkType", "type": ["@type": "networkTypeOther"]]) { result in
+      self.finish(result, resolve: resolve, reject: reject)
+    }
+  }
+
+  @objc(trimCache:rejecter:)
+  func trimCache(_ resolve: @escaping RCTPromiseResolveBlock,
+                 rejecter reject: @escaping RCTPromiseRejectBlock) {
+    request(["@type": "optimizeStorage", "size": 512 * 1024 * 1024,
+             "ttl": -1, "count": -1, "immunity_delay": 3600,
+             "file_types": [["@type": "fileTypeAudio"]],
+             "chat_ids": [], "exclude_chat_ids": [],
+             "return_deleted_file_statistics": false, "chat_limit": 0]) { result in
+      self.finish(result, resolve: resolve, reject: reject)
     }
   }
 

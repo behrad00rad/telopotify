@@ -1,5 +1,5 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {FlatList, Image, Modal, NativeEventEmitter, NativeModules, Pressable,
+import {AppState, FlatList, Image, Modal, NativeEventEmitter, NativeModules, Pressable,
   SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput,
   TouchableOpacity, View} from 'react-native';
 import {Icon, IconName} from '../components/Icon';
@@ -9,6 +9,7 @@ type Track = {messageId: string; fileId: number; fileSize: number; mimeType: str
 type Auth = {state: string; error?: string};
 type Channel = {id: string; title: string};
 type Page = {tracks: Track[]; nextCursor: string; hasMore: boolean};
+type Catalog = {tracks: Track[]; cursor: string; more: boolean};
 type Snapshot = {status: string; messageId: string; title: string; artist: string;
   position: number; duration: number; queueIndex: number; queueCount: number};
 type Library = {liked: string[]; playlists: Record<string, string[]>};
@@ -18,6 +19,8 @@ const tg = NativeModules.TelopotifyTelegram as {
   sendCode(v: string): Promise<void>; sendPassword(v: string): Promise<void>;
   listChannels(): Promise<Channel[]>; selectChannel(id: string): Promise<Channel>;
   getSelectedChannel(): Promise<string | null>; getTrackPage(cursor: string): Promise<Page>;
+  getCatalog(channelId: string): Promise<string>; saveCatalog(channelId: string, value: string): Promise<boolean>;
+  reconnect(): Promise<unknown>; trimCache(): Promise<unknown>;
   getArtwork(id: number): Promise<string | null>;
   getLibraryState(): Promise<string>; saveLibraryState(value: string): Promise<boolean>;
 };
@@ -64,14 +67,14 @@ export default function IOSApp() {
   const [input, setInput] = useState(''); const [busy, setBusy] = useState(false);
   const [error, setError] = useState(''); const [channels, setChannels] = useState<Channel[]>([]);
   const [channel, setChannel] = useState<string | null>(null);
-  const [tracks, setTracks] = useState<Track[]>([]); const [cursor, setCursor] = useState('');
-  const [more, setMore] = useState(true); const [loading, setLoading] = useState(false);
+  const [restoring, setRestoring] = useState(true);
+  const [tracks, setTracks] = useState<Track[]>([]); const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<Tab>('Home'); const [scope, setScope] = useState<{name: string; tracks: Track[]} | null>(null);
   const [search, setSearch] = useState(''); const [snapshot, setSnapshot] = useState<Snapshot>(initial);
   const [nowOpen, setNowOpen] = useState(false); const [progressWidth, setProgressWidth] = useState(1);
   const [library, setLibrary] = useState<Library>({liked: [], playlists: {}});
   const [playlistName, setPlaylistName] = useState(''); const [addSong, setAddSong] = useState<Track | null>(null);
-  const loadingRef = useRef(false); const allQueueRef = useRef(false);
+  const allQueueRef = useRef(false); const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     const events = new NativeEventEmitter(NativeModules.TelopotifyTelegram);
@@ -83,6 +86,8 @@ export default function IOSApp() {
       const saved = JSON.parse(raw) as Partial<Library>;
       setLibrary({liked: saved.liked ?? [], playlists: saved.playlists ?? {}});
     }).catch(() => {});
+    tg.getSelectedChannel().then(setChannel).catch(e => setError(String(e)))
+      .finally(() => setRestoring(false));
     return () => sub.remove();
   }, []);
   const ready = auth.state === 'authorizationStateReady';
@@ -92,23 +97,88 @@ export default function IOSApp() {
   const prompt = phone ? 'Phone number with country code' : code ? 'Telegram code' : 'Two-step password';
 
   const refreshChannels = useCallback(async () => {
-    try { const [saved, available] = await Promise.all([tg.getSelectedChannel(), tg.listChannels()]);
-      setChannel(saved); setChannels(available); }
+    try { setChannels(await tg.listChannels()); }
     catch (e) { setError(String(e)); }
   }, []);
-  useEffect(() => { if (ready) { refreshChannels(); } }, [ready, refreshChannels]);
-  const load = useCallback(async (from: string, replace = false) => {
-    if (loadingRef.current) { return; }
-    loadingRef.current = true; setLoading(true);
-    try { const page = await tg.getTrackPage(from);
-      setTracks(prev => replace ? page.tracks : [...prev, ...page.tracks]);
-      if (!replace && allQueueRef.current) { audio.appendQueue(page.tracks); }
-      setCursor(page.nextCursor); setMore(page.hasMore && !!page.nextCursor && page.nextCursor !== from);
-    } catch (e) { setError(String(e)); setMore(false); }
-    finally { loadingRef.current = false; setLoading(false); }
+  useEffect(() => { if (ready && !channel && !restoring) { refreshChannels(); } }, [ready, channel, restoring, refreshChannels]);
+  useEffect(() => { if (!ready) { return; }
+    tg.trimCache().catch(() => {});
+  }, [ready]);
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'active') {
+        tg.reconnect().catch(() => {});
+        audio.getSnapshot().then(value => {
+          if (value.status !== 'playing' && value.status !== 'opening') { tg.trimCache().catch(() => {}); }
+        }).catch(() => {});
+        setRetryNonce(n => n + 1);
+      }
+    });
+    return () => subscription.remove();
   }, []);
-  useEffect(() => { if (ready && channel) { load('', true); } }, [ready, channel, load]);
-  useEffect(() => { if (channel && !loading && more && cursor) { load(cursor); } }, [channel, loading, more, cursor, load]);
+  useEffect(() => {
+    if (!ready || !channel) { return; }
+    let cancelled = false; let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const index = async () => {
+      let catalog: Catalog = {tracks: [], cursor: '', more: true};
+      try {
+        const raw = await tg.getCatalog(channel);
+        if (raw) { const saved = JSON.parse(raw) as Catalog;
+          if (Array.isArray(saved.tracks) && typeof saved.cursor === 'string') {
+            catalog = {tracks: saved.tracks, cursor: saved.cursor, more: saved.more !== false};
+          }
+        }
+      } catch { /* A missing or old catalog can be indexed again. */ }
+      if (cancelled) { return; }
+      setTracks(catalog.tracks);
+      setLoading(true); setError('');
+      try {
+        // Scan new messages until they meet the saved catalog, then resume its older cursor.
+        const savedTracks = catalog.tracks;
+        const known = new Set(savedTracks.map(t => t.messageId));
+        const resumeCursor = catalog.cursor;
+        const resumeMore = catalog.more;
+        const recent: Track[] = [];
+        let refreshing = savedTracks.length > 0;
+        let from = '';
+        while (!cancelled) {
+          const page = await tg.getTrackPage(from);
+          if (cancelled) { break; }
+          const seen = new Set(catalog.tracks.map(t => t.messageId));
+          const fresh = page.tracks.filter(t => !seen.has(t.messageId));
+          if (refreshing) {
+            recent.push(...fresh);
+            catalog.tracks = [...recent, ...savedTracks];
+          } else { catalog.tracks = [...catalog.tracks, ...fresh]; }
+          if (fresh.length && allQueueRef.current) { audio.appendQueue(fresh); }
+          const next = page.nextCursor;
+          const pageHasMore = page.hasMore && !!next && next !== from;
+          if (refreshing && (page.tracks.some(t => known.has(t.messageId)) || !pageHasMore)) {
+            refreshing = false;
+            from = resumeCursor;
+            catalog.more = resumeMore && !!resumeCursor;
+            catalog.cursor = from;
+          } else if (refreshing) {
+            from = next;
+            catalog.cursor = resumeCursor;
+            catalog.more = resumeMore;
+          } else {
+            from = next;
+            catalog.more = pageHasMore;
+            catalog.cursor = from;
+          }
+          setTracks(catalog.tracks);
+          await tg.saveCatalog(channel, JSON.stringify(catalog));
+          if (!catalog.more) { break; }
+        }
+      } catch (e) {
+        if (!cancelled) { setError(`Indexing paused: ${String(e)}`);
+          retryTimer = setTimeout(() => setRetryNonce(n => n + 1), 15000); }
+      } finally { if (!cancelled) { setLoading(false); } }
+    };
+    index();
+    return () => { cancelled = true; if (retryTimer) { clearTimeout(retryTimer); } };
+  }, [ready, channel, retryNonce]);
   useEffect(() => { if (!ready) { return; }
     let alive = true;
     const poll = () => audio.getSnapshot().then(value => { if (alive) { setSnapshot(value); } }).catch(() => {});
@@ -161,8 +231,8 @@ export default function IOSApp() {
     catch (e) { setError(String(e)); } finally { setBusy(false); }
   };
   const chooseChannel = async (c: Channel) => {
-    try { await tg.selectChannel(c.id); setChannel(c.id); setTracks([]); setCursor('');
-      setMore(true); setScope(null); setTab('Home'); setError(''); }
+    try { await tg.selectChannel(c.id); setChannel(c.id); setTracks([]);
+      setScope(null); setTab('Home'); setError(''); }
     catch (e) { setError(String(e)); }
   };
 
@@ -189,7 +259,7 @@ export default function IOSApp() {
     <ScrollView contentContainerStyle={s.setup} keyboardShouldPersistTaps="handled">
       <Image source={require('../../assets/telopotify-logo.png')} style={s.mark} />
       <Text style={s.eyebrow}>TELOPOTIFY</Text>
-      <Text style={s.setupTitle}>{ready ? 'Choose your channel.' : 'Your music, anywhere.'}</Text>
+      <Text style={s.setupTitle}>{ready && !restoring ? 'Choose your channel.' : 'Your music, anywhere.'}</Text>
       <Text style={s.setupCopy}>{ready ? 'Pick the Telegram channel with your songs.' :
         phone || code || password ? prompt : 'Connecting directly to Telegram on this iPhone.'}</Text>
       {(phone || code || password) && <><TextInput style={s.input} value={input} onChangeText={setInput}
@@ -197,7 +267,7 @@ export default function IOSApp() {
         keyboardType={phone ? 'phone-pad' : 'default'} secureTextEntry={password} onSubmitEditing={submit} />
         <TouchableOpacity style={s.primary} onPress={submit} disabled={busy || !input.trim()}>
           <Text style={s.primaryText}>{busy ? 'Connecting…' : 'Continue'}</Text></TouchableOpacity></>}
-      {ready && channels.map(c => <TouchableOpacity key={c.id} style={s.channelRow} onPress={() => chooseChannel(c)}>
+      {ready && !restoring && channels.map(c => <TouchableOpacity key={c.id} style={s.channelRow} onPress={() => chooseChannel(c)}>
         <View style={s.channelMark}><Text style={s.rowTitle}>{c.title.slice(0, 1).toUpperCase()}</Text></View>
         <Text style={s.rowTitle}>{c.title}</Text></TouchableOpacity>)}
       <TouchableOpacity style={s.textButton} onPress={ready ? refreshChannels :
@@ -212,7 +282,9 @@ export default function IOSApp() {
     <View style={s.header}><View><Text style={s.eyebrow}>YOUR CHANNEL</Text>
       <Text style={s.headerTitle}>{tab}</Text></View>
       <Button icon="sync" label="Switch channel" onPress={() => setChannel(null)} /></View>
-    {!!error && <Text style={s.banner}>{error}</Text>}
+    {!!error && <TouchableOpacity style={s.banner} onPress={() => {
+      tg.reconnect().catch(() => {}); setRetryNonce(n => n + 1);
+    }}><Text style={s.bannerText}>{error}  ·  Tap to retry</Text></TouchableOpacity>}
 
     {tab === 'Home' && <ScrollView style={s.page} contentContainerStyle={s.content}>
       <Text style={s.welcome}>Listen to what you love.</Text>
@@ -342,7 +414,8 @@ const s = StyleSheet.create({
   channelRow: {flexDirection: 'row', alignItems: 'center', minHeight: 66, gap: 14},
   channelMark: {width: 44, height: 44, borderRadius: 10, backgroundColor: '#203449', alignItems: 'center', justifyContent: 'center'},
   textButton: {paddingVertical: 16}, accent: {color: '#eba068'}, error: {color: '#ff9c9c', marginTop: 14},
-  banner: {color: '#ff9c9c', backgroundColor: '#33212a', padding: 10, fontSize: 12},
+  banner: {backgroundColor: '#33212a', padding: 10},
+  bannerText: {color: '#ff9c9c', fontSize: 12},
   header: {paddingHorizontal: 20, paddingTop: 12, paddingBottom: 15, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'},
   headerTitle: {color: '#f3f5f7', fontSize: 27, fontWeight: '800', marginTop: 3},
   iconButton: {width: 38, height: 38, alignItems: 'center', justifyContent: 'center'},

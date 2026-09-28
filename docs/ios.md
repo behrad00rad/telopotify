@@ -33,8 +33,13 @@ songs while JavaScript is suspended, with next/previous lock-screen commands.
 The iPhone library includes songs, artists, caption-labeled albums, likes,
 playlists stored on the phone, and Telegram cover thumbnails. Telegram audio
 metadata has no reliable album-name field; songs without an `Album:` caption
-are grouped as untagged. Multi-song background playback and network recovery
-still need device testing.
+are grouped as untagged. The chosen channel and indexed song metadata are
+saved in the app's private storage, so reopening the app restores the library
+and continues an incomplete index. It refreshes recent messages before
+resuming older history. TDLib's audio-file cache is trimmed to 512 MiB on
+startup and when returning to the app while playback is idle. Network changes
+reopen TDLib connections, and range requests retry while the VPN reconnects.
+Multi-song background playback and network recovery still need device testing.
 Telegram's public sample API credentials are only for development. A dedicated
 API ID/hash are required before distribution.
 

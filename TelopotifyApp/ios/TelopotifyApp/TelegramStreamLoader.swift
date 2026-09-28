@@ -13,6 +13,7 @@ final class TelegramStreamLoader: NSObject, AVAssetResourceLoaderDelegate {
   private var active: AVAssetResourceLoadingRequest?
   private var cancelled = Set<ObjectIdentifier>()
   private let chunkSize = 256 * 1024
+  private let maxRetries = 30
 
   init(fileId: Int, fileSize: Int64, mimeType: String) {
     self.fileId = fileId
@@ -37,6 +38,11 @@ final class TelegramStreamLoader: NSObject, AVAssetResourceLoaderDelegate {
                       didCancel request: AVAssetResourceLoadingRequest) {
     cancelled.insert(ObjectIdentifier(request))
     pending.removeAll { $0 === request }
+    if active === request {
+      active = nil
+      cancelled.remove(ObjectIdentifier(request))
+      advance()
+    }
   }
 
   private func advance() {
@@ -57,7 +63,7 @@ final class TelegramStreamLoader: NSObject, AVAssetResourceLoaderDelegate {
   }
 
   private func serve(_ request: AVAssetResourceLoadingRequest, offset: Int64,
-                     remaining: Int64) {
+                     remaining: Int64, retries: Int = 0) {
     guard active === request else { return }
     if cancelled.remove(ObjectIdentifier(request)) != nil {
       active = nil
@@ -91,9 +97,16 @@ final class TelegramStreamLoader: NSObject, AVAssetResourceLoaderDelegate {
           self.serve(request, offset: offset + Int64(bytes.count),
                      remaining: remaining - Int64(bytes.count))
         case .failure(let error):
-          request.finishLoading(with: error)
-          self.active = nil
-          self.advance()
+          if retries < self.maxRetries {
+            let delay = min(10.0, Double(1 << min(retries, 3)))
+            self.queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+              self?.serve(request, offset: offset, remaining: remaining, retries: retries + 1)
+            }
+          } else {
+            request.finishLoading(with: error)
+            self.active = nil
+            self.advance()
+          }
         }
       }
     }
