@@ -295,7 +295,9 @@ export default function IOSApp() {
             <Text style={s.nowArtist}>{snapshot.artist || 'Unknown artist'}</Text></View>
             {current && <Button icon={library.liked.includes(current.messageId) ? 'favoriteFilled' : 'favorite'}
               label="Like song" color="#eba068" onPress={() => like(current)} />}
-            {current && <Button icon="add" label="Add to playlist" onPress={() => setAddSong(current)} />}
+            {current && <Button icon="add" label="Add to playlist" onPress={() => {
+              setNowOpen(false); setAddSong(current);
+            }} />}
           </View>
           <Pressable style={s.progressTouch} accessibilityRole="adjustable" accessibilityLabel="Song progress"
             onLayout={e => setProgressWidth(e.nativeEvent.layout.width)} onPress={e => seek(e.nativeEvent.locationX)}>
