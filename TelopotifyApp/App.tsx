@@ -16,20 +16,20 @@ const c = {
 };
 
 const AnimatedPressable = Animated.createAnimatedComponent(NativePressable);
-function Pressable({ style, disabled, onHoverIn, onHoverOut, onPressIn, onPressOut, ...props }:
-  React.ComponentProps<typeof NativePressable>) {
+function Pressable({ style, disabled, hoverAnimation = true, onHoverIn, onHoverOut, onPressIn, onPressOut, ...props }:
+  React.ComponentProps<typeof NativePressable> & { hoverAnimation?: boolean }) {
   const motion = useRef(new Animated.Value(0)).current;
   const hovered = useRef(false);
   const animate = (value: number) => Animated.timing(motion, {
     toValue: value, duration: 140, useNativeDriver: true,
   }).start();
   return <AnimatedPressable {...props} disabled={disabled}
-    onHoverIn={event => { hovered.current = true; if (!disabled) animate(1); onHoverIn?.(event); }}
-    onHoverOut={event => { hovered.current = false; animate(0); onHoverOut?.(event); }}
-    onPressIn={event => { if (!disabled) animate(1.5); onPressIn?.(event); }}
-    onPressOut={event => { animate(hovered.current ? 1 : 0); onPressOut?.(event); }}
+    onHoverIn={event => { hovered.current = true; if (hoverAnimation && !disabled) animate(1); onHoverIn?.(event); }}
+    onHoverOut={event => { hovered.current = false; if (hoverAnimation) animate(0); onHoverOut?.(event); }}
+    onPressIn={event => { if (hoverAnimation && !disabled) animate(1.5); onPressIn?.(event); }}
+    onPressOut={event => { if (hoverAnimation) animate(hovered.current ? 1 : 0); onPressOut?.(event); }}
     style={[style as ViewStyle, { cursor: disabled ? 'auto' : 'pointer' } as ViewStyle,
-      { opacity: motion.interpolate({ inputRange: [0, 1, 1.5], outputRange: [1, 0.88, 0.72] }),
+      hoverAnimation && { opacity: motion.interpolate({ inputRange: [0, 1, 1.5], outputRange: [1, 0.88, 0.72] }),
         transform: [{ scale: motion.interpolate({ inputRange: [0, 1, 1.5], outputRange: [1, 1.012, 0.985] }) }] }]} />;
 }
 
@@ -96,7 +96,7 @@ async function bridgeRequest<T>(connection: Bridge, path: string, data?: object)
 }
 
 export default function App() {
-  const { width, height } = useWindowDimensions();
+  const { width } = useWindowDimensions();
   const wide = width >= 800;
   const [query, setQuery] = useState('');
   const [bridge, setBridge] = useState<Bridge | null>(null);
@@ -131,6 +131,7 @@ export default function App() {
   const [cacheBusy, setCacheBusy] = useState(false);
   const [unavailableTrackIds, setUnavailableTrackIds] = useState<Set<string>>(() => new Set());
   const [playbackNotice, setPlaybackNotice] = useState('');
+  const [reconnectBusy, setReconnectBusy] = useState(false);
   const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
   const [playbackStatus, setPlaybackStatus] = useState('stopped');
@@ -207,7 +208,7 @@ export default function App() {
     (bridge?.online || pinnedIds.has(track.id))),
     [tracks, unavailableTrackIds, bridge?.online, pinnedIds]);
   const duration = nativeDuration || selected?.durationSeconds || 0;
-  const items = page === 'home' ? tracks.slice(0, 12) :
+  const items = useMemo(() => page === 'home' ? tracks.slice(0, 12) :
     page === 'library' ? discovered : page === 'favorites' ?
     discovered.filter(track => favorites.includes(track.id)) :
     page === 'playlists' ? (activePlaylist?.trackIds ?? []).map(id => tracks.find(track => track.id === id)!).filter(Boolean) :
@@ -217,7 +218,14 @@ export default function App() {
       (albumOverrides[track.id] || 'Unsorted tracks') === activeAlbum) : [] :
     page === 'nowPlaying' ? queue.trackIds.slice(queue.currentIndex + 1)
       .map(id => tracks.find(track => track.id === id)!).filter(Boolean) :
-    queue.trackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean);
+    queue.trackIds.map(id => tracks.find(track => track.id === id)!).filter(Boolean),
+  [page, tracks, discovered, favorites, activePlaylist, recentTrackIds, activeArtist,
+    activeAlbum, albumOverrides, queue.trackIds, queue.currentIndex]);
+  const groupPage = (page === 'artists' && !activeArtist) || (page === 'albums' && !activeAlbum);
+  const groupRows = useMemo(() => (page === 'artists' ? artistGroups : albumGroups)
+    .filter(([name]) => name.toLocaleLowerCase().includes(groupQuery.trim().toLocaleLowerCase())),
+  [page, artistGroups, albumGroups, groupQuery]);
+  const pageRows: Array<Track | [string, Track[]]> = groupPage ? groupRows : items;
 
   const playTrack = useCallback(async (track: Track) => {
     if (!bridge || (!bridge.online && !pinnedIds.has(track.id))) return;
@@ -419,7 +427,8 @@ export default function App() {
     setAuthError(data.error);
     setSyncing(data.syncing);
     setSyncError(data.syncError || '');
-    if (data.cache) setCache(data.cache);
+    if (data.cache) setCache(current => current.bytes === data.cache.bytes &&
+      current.limitBytes === data.cache.limitBytes && current.chunks === data.cache.chunks ? current : data.cache);
     if (data.offline) setOffline(current => JSON.stringify(current) === JSON.stringify(data.offline) ?
       current : data.offline!);
     const savedIds = new Set(data.offline?.pinnedIds ?? []);
@@ -442,6 +451,7 @@ export default function App() {
     if (data.authenticated && !data.selected) await loadChannels(connection);
     if (data.online && (!lastOnline.current || data.catalogRevision !== loadedRevision.current)) {
       await loadLibrary(connection);
+      setPlaybackNotice('');
     }
     if (!data.online) {
       if (lastOnline.current && (!playingTrackId || !savedIds.has(playingTrackId))) {
@@ -567,6 +577,23 @@ export default function App() {
     } catch (error) {
       setConnectionStatus(error instanceof Error ? error.message : 'Could not clear cache');
     } finally { setCacheBusy(false); }
+  }
+
+  async function retryConnection() {
+    if (!bridge || reconnectBusy) return;
+    setReconnectBusy(true);
+    setPlaybackNotice('Reconnecting to Telegram…');
+    try {
+      await bridgeRequest(bridge, '/reconnect', {});
+      await refreshStatus(bridge);
+      if (lastOnline.current) {
+        setPlaybackNotice('');
+      } else {
+        setPlaybackNotice('Waiting for Telegram. The saved session will retry automatically.');
+      }
+    } catch (error) {
+      setPlaybackNotice(error instanceof Error ? error.message : 'Could not reconnect to Telegram');
+    } finally { setReconnectBusy(false); }
   }
 
   async function pinSongs(songIds: string[]) {
@@ -856,8 +883,80 @@ export default function App() {
       </View>}
       <Animated.View style={[s.main, { opacity: pageMotion,
         transform: [{ translateY: pageMotion.interpolate({ inputRange: [0, 1], outputRange: [7, 0] }) }] }]}>
-      <ScrollView key={`${page}:${activeArtist}:${activeAlbum}`} style={s.pageScroll}
-        contentContainerStyle={s.pageScrollContent} nestedScrollEnabled keyboardShouldPersistTaps="handled">
+      <FlatList<Track | [string, Track[]]>
+        key={`${page}:${activeArtist}:${activeAlbum}`}
+        style={s.pageScroll} contentContainerStyle={s.pageScrollContent}
+        keyboardShouldPersistTaps="handled" data={pageRows}
+        keyExtractor={item => Array.isArray(item) ? item[0] : item.id}
+          renderItem={({ item, index }) => Array.isArray(item) ? <GroupRow
+            icon={page === 'artists' ? 'artist' : 'album'} name={item[0]} count={item[1].length}
+            track={item[1][0]} onPress={() => page === 'artists' ?
+              setActiveArtist(item[0]) : setActiveAlbum(item[0])} /> : <View
+            style={[s.row, selected?.id === item.id && s.selected, unavailableTrackIds.has(item.id) && s.unavailableRow]}>
+            <Pressable accessibilityRole="button"
+              accessibilityLabel={unavailableTrackIds.has(item.id) && !pinnedIds.has(item.id) ? `${item.title} unavailable` : `Play ${item.title}`}
+              disabled={!playableTracks.some(track => track.id === item.id)}
+              onPress={() => {
+                if (page === 'queue') {
+                  setQueue(current => ({ ...current, currentIndex: current.trackIds.indexOf(item.id) }));
+                  playTrack(item);
+                } else playSongs(page === 'playlists' ? activePlaylist?.trackIds ?? [] :
+                  items.map(track => track.id), item.id);
+              }} style={s.rowMain}>
+              <Text style={[s.rowNumber, selected?.id === item.id && s.activeRowText]}>{String(index + 1).padStart(2, '0')}</Text>
+              <Cover track={item} />
+              <View style={s.trackText}>
+                <Text numberOfLines={1} style={[s.trackTitle, selected?.id === item.id && s.activeRowText]}>{item.title}</Text>
+                <Text numberOfLines={1} style={s.trackArtist}>{item.artist}{pinnedIds.has(item.id) ? ' · Offline' :
+                  unavailableTrackIds.has(item.id) ? ' · Unavailable' : ''}</Text>
+              </View>
+            </Pressable>
+            {wide && <Text style={s.rowSize}>{size(item.fileSize)}</Text>}
+            <Text style={s.rowDuration}>{item.durationSeconds ? clock(item.durationSeconds) : '—'}</Text>
+            <View style={s.rowActions}>
+              {page !== 'queue' && <RowAction icon={favorites.includes(item.id) ? 'favoriteFilled' : 'favorite'}
+                label={`${favorites.includes(item.id) ? 'Remove' : 'Add'} favorite ${item.title}`}
+                active={favorites.includes(item.id)} onPress={() => toggleFavorite(item.id)} />}
+              {(page === 'library' || page === 'favorites' || page === 'recent') && <RowAction icon="playlist"
+                label={`Add ${item.title} to playlist`} disabled={!collectionsReady}
+                onPress={() => setPlaylistPickerTrackId(item.id)} />}
+              {page === 'playlists' && activePlaylist && <RowAction icon="remove"
+                label={`Remove ${item.title} from playlist`} onPress={() => togglePlaylistTrack(activePlaylist.id, item.id)} />}
+              {page !== 'queue' && <RowAction icon="add" label={`Play ${item.title} next`}
+                disabled={!playableTracks.some(track => track.id === item.id)} onPress={() => setQueue(current => playNextInQueue(current, item.id))} />}
+              {page !== 'queue' && <RowAction icon={pinnedIds.has(item.id) ? 'offline' : 'download'}
+                label={`${pinnedIds.has(item.id) ? 'Remove' : 'Save'} ${item.title} offline`}
+                disabled={offlineBusy || (!online && !pinnedIds.has(item.id))}
+                active={pinnedIds.has(item.id)} onPress={() => pinnedIds.has(item.id) ?
+                  unpinSongs([item.id]) : pinSongs([item.id])} />}
+              {page === 'albums' && <RowAction icon="album" label={`Set album for ${item.title}`}
+                onPress={() => { setAlbumEditTrackId(item.id); setAlbumEditName(albumOverrides[item.id] ?? ''); }} />}
+              {page === 'queue' && <>
+                <QueueDragHandle trackId={item.id} index={index} onDrop={destination =>
+                  setQueue(current => moveQueueTrackTo(current, item.id, destination))} />
+                <RowAction icon="up" label={`Move ${item.title} up`} disabled={index === 0}
+                  onPress={() => setQueue(current => moveQueueTrack(current, item.id, -1))} />
+                <RowAction icon="down" label={`Move ${item.title} down`} disabled={index === items.length - 1}
+                  onPress={() => setQueue(current => moveQueueTrack(current, item.id, 1))} />
+                <RowAction icon="remove" label={`Remove ${item.title} from queue`}
+                  onPress={() => removeQueuedTrack(item.id)} />
+              </>}
+            </View>
+          </View>}
+          ListEmptyComponent={groupPage ? <Text style={s.empty}>No matching {page} yet.</Text> : <View style={s.emptyCard}><Icon name="music" size={28} color={c.accent} />
+            <Text style={s.emptyTitle}>{query && (page === 'library' || page === 'favorites') ? 'No songs found' :
+              (page === 'library' && tracks.length || page === 'favorites' && favorites.length) ? 'No matching songs' :
+              page === 'queue' ? 'Your queue is empty' : page === 'favorites' ? 'No favorites yet' :
+              page === 'playlists' ? 'This playlist is empty' : page === 'recent' ? 'Nothing played yet' :
+              'Your songs will appear here'}</Text>
+            <Text style={s.empty}>{page === 'favorites' ? 'Use the star beside a song to save it here.' :
+              page === 'playlists' ? 'Add songs using the playlist icon in your library.' :
+              page === 'queue' ? 'Add songs from your library or a playlist.' :
+              page === 'recent' ? 'Songs you play will show up here.' :
+              page === 'library' && tracks.length ?
+                'Try changing the search or filters.' : connectionStatus}</Text></View>}
+        ListHeaderComponent={<>
+
         {!wide && <View style={s.compactNav}>
           <View style={s.compactBrandRow}><Image source={require('./assets/telopotify-logo.png')}
             style={s.compactLogo} /><Text style={s.compactBrand}>telopotify</Text></View>
@@ -922,6 +1021,15 @@ export default function App() {
           <Pressable accessibilityRole="button" accessibilityLabel="Sign out of Telegram"
             onPress={signOut}><Text style={s.accountAction}>Sign out</Text></Pressable>
         </View>}
+        {bridge && tracks.length > 0 && !online && <View style={s.connectionRecovery}>
+          <View style={s.recoveryCopy}><Text style={s.recoveryTitle}>Telegram is offline</Text>
+            <Text style={s.recoveryDetail}>Your saved session is still here. Reconnect when your network is available.</Text></View>
+          <Pressable accessibilityRole="button" accessibilityLabel="Reconnect to Telegram"
+            disabled={reconnectBusy} onPress={retryConnection} style={s.recoveryAction}>
+            <Icon name="sync" size={15} color={c.soft} />
+            <Text style={s.alertActionText}>{reconnectBusy ? 'Reconnecting' : 'Reconnect'}</Text>
+          </Pressable>
+        </View>}
         {bridge && tracks.length > 0 && page === 'library' && <View style={s.storageRow}>
           <View style={s.storageCell}><CacheInfo stats={cache} busy={cacheBusy} onClear={clearCache} /></View>
           <View style={s.storageCell}><OfflineInfo stats={offline} error={offlineError}
@@ -931,9 +1039,10 @@ export default function App() {
           <View style={s.alertCopy}><Text style={s.alertTitle}>Playback interrupted</Text>
             <Text style={s.alertDetail}>{playbackNotice || 'Could not stream this song. Check the connection and try again.'}</Text></View>
           <Pressable accessibilityRole="button" accessibilityLabel="Retry playback"
-            disabled={!selected || (!online && !pinnedIds.has(selected.id))}
-            onPress={() => selected && playTrack(selected)} style={s.alertAction}>
-            <Icon name="sync" size={15} color={c.soft} /><Text style={s.alertActionText}>Retry</Text>
+            disabled={reconnectBusy || (!selected && online)}
+            onPress={() => online ? selected && playTrack(selected) : retryConnection()} style={s.alertAction}>
+            <Icon name="sync" size={15} color={c.soft} /><Text style={s.alertActionText}>
+              {reconnectBusy ? 'Reconnecting' : online ? 'Retry' : 'Reconnect'}</Text>
           </Pressable>
         </View>}
         {!!collectionError && <Text style={s.authError}>{collectionError}</Text>}
@@ -1097,14 +1206,7 @@ export default function App() {
           <><TextInput accessibilityLabel={`Search ${page}`} placeholder={`Search ${page}`}
             placeholderTextColor={c.muted} value={groupQuery} onChangeText={setGroupQuery}
             style={[s.search, s.groupSearch]} />
-          <FlatList style={[s.groupList, { height: Math.max(300, Math.min(620, height - 310)) }]}
-            nestedScrollEnabled data={(page === 'artists' ? artistGroups : albumGroups)
-            .filter(([name]) => name.toLocaleLowerCase().includes(groupQuery.trim().toLocaleLowerCase()))}
-            keyExtractor={item => item[0]} renderItem={({ item }) => <GroupRow
-              icon={page === 'artists' ? 'artist' : 'album'} name={item[0]} count={item[1].length}
-              track={item[1][0]} onPress={() => page === 'artists' ?
-                setActiveArtist(item[0]) : setActiveAlbum(item[0])} />}
-            ListEmptyComponent={<Text style={s.empty}>No matching {page} yet.</Text>} /></> : <>
+</> : <>
         <View style={[s.toolbar, !wide && s.toolbarCompact]}><View><Text style={s.section}>{page === 'library' ? 'All songs' :
           page === 'favorites' ? 'Liked songs' : page === 'playlists' ? activePlaylist?.name ?? 'Playlist songs' :
           page === 'recent' ? 'Your latest listens' : page === 'home' ? 'Fresh from your channel' :
@@ -1154,74 +1256,9 @@ export default function App() {
         <View style={s.tableHead}><Text style={s.tableNumber}>#</Text><View style={s.tableCover} /><Text style={s.tableTitle}>TITLE</Text>
           {wide && <Text style={s.tableSize}>SIZE</Text>}<Text style={s.tableDuration}>TIME</Text>
           <View style={[s.tableActions, page === 'queue' && s.tableQueueActions]} /></View>
-        <FlatList style={[s.songList, { height: Math.max(310, Math.min(680, height - 300)) }]}
-          nestedScrollEnabled data={items} keyExtractor={item => item.id}
-          renderItem={({ item, index }) => <View
-            style={[s.row, selected?.id === item.id && s.selected, unavailableTrackIds.has(item.id) && s.unavailableRow]}>
-            <Pressable accessibilityRole="button"
-              accessibilityLabel={unavailableTrackIds.has(item.id) && !pinnedIds.has(item.id) ? `${item.title} unavailable` : `Play ${item.title}`}
-              disabled={!playableTracks.some(track => track.id === item.id)}
-              onPress={() => {
-                if (page === 'queue') {
-                  setQueue(current => ({ ...current, currentIndex: current.trackIds.indexOf(item.id) }));
-                  playTrack(item);
-                } else playSongs(page === 'playlists' ? activePlaylist?.trackIds ?? [] :
-                  items.map(track => track.id), item.id);
-              }} style={s.rowMain}>
-              <Text style={[s.rowNumber, selected?.id === item.id && s.activeRowText]}>{String(index + 1).padStart(2, '0')}</Text>
-              <Cover track={item} />
-              <View style={s.trackText}>
-                <Text numberOfLines={1} style={[s.trackTitle, selected?.id === item.id && s.activeRowText]}>{item.title}</Text>
-                <Text numberOfLines={1} style={s.trackArtist}>{item.artist}{pinnedIds.has(item.id) ? ' · Offline' :
-                  unavailableTrackIds.has(item.id) ? ' · Unavailable' : ''}</Text>
-              </View>
-            </Pressable>
-            {wide && <Text style={s.rowSize}>{size(item.fileSize)}</Text>}
-            <Text style={s.rowDuration}>{item.durationSeconds ? clock(item.durationSeconds) : '—'}</Text>
-            <View style={s.rowActions}>
-              {page !== 'queue' && <RowAction icon={favorites.includes(item.id) ? 'favoriteFilled' : 'favorite'}
-                label={`${favorites.includes(item.id) ? 'Remove' : 'Add'} favorite ${item.title}`}
-                active={favorites.includes(item.id)} onPress={() => toggleFavorite(item.id)} />}
-              {(page === 'library' || page === 'favorites' || page === 'recent') && <RowAction icon="playlist"
-                label={`Add ${item.title} to playlist`} disabled={!collectionsReady}
-                onPress={() => setPlaylistPickerTrackId(item.id)} />}
-              {page === 'playlists' && activePlaylist && <RowAction icon="remove"
-                label={`Remove ${item.title} from playlist`} onPress={() => togglePlaylistTrack(activePlaylist.id, item.id)} />}
-              {page !== 'queue' && <RowAction icon="add" label={`Play ${item.title} next`}
-                disabled={!playableTracks.some(track => track.id === item.id)} onPress={() => setQueue(current => playNextInQueue(current, item.id))} />}
-              {page !== 'queue' && <RowAction icon={pinnedIds.has(item.id) ? 'offline' : 'download'}
-                label={`${pinnedIds.has(item.id) ? 'Remove' : 'Save'} ${item.title} offline`}
-                disabled={offlineBusy || (!online && !pinnedIds.has(item.id))}
-                active={pinnedIds.has(item.id)} onPress={() => pinnedIds.has(item.id) ?
-                  unpinSongs([item.id]) : pinSongs([item.id])} />}
-              {page === 'albums' && <RowAction icon="album" label={`Set album for ${item.title}`}
-                onPress={() => { setAlbumEditTrackId(item.id); setAlbumEditName(albumOverrides[item.id] ?? ''); }} />}
-              {page === 'queue' && <>
-                <QueueDragHandle trackId={item.id} index={index} onDrop={destination =>
-                  setQueue(current => moveQueueTrackTo(current, item.id, destination))} />
-                <RowAction icon="up" label={`Move ${item.title} up`} disabled={index === 0}
-                  onPress={() => setQueue(current => moveQueueTrack(current, item.id, -1))} />
-                <RowAction icon="down" label={`Move ${item.title} down`} disabled={index === items.length - 1}
-                  onPress={() => setQueue(current => moveQueueTrack(current, item.id, 1))} />
-                <RowAction icon="remove" label={`Remove ${item.title} from queue`}
-                  onPress={() => removeQueuedTrack(item.id)} />
-              </>}
-            </View>
-          </View>}
-          ListEmptyComponent={<View style={s.emptyCard}><Icon name="music" size={28} color={c.accent} />
-            <Text style={s.emptyTitle}>{query && (page === 'library' || page === 'favorites') ? 'No songs found' :
-              (page === 'library' && tracks.length || page === 'favorites' && favorites.length) ? 'No matching songs' :
-              page === 'queue' ? 'Your queue is empty' : page === 'favorites' ? 'No favorites yet' :
-              page === 'playlists' ? 'This playlist is empty' : page === 'recent' ? 'Nothing played yet' :
-              'Your songs will appear here'}</Text>
-            <Text style={s.empty}>{page === 'favorites' ? 'Use the star beside a song to save it here.' :
-              page === 'playlists' ? 'Add songs using the playlist icon in your library.' :
-              page === 'queue' ? 'Add songs from your library or a playlist.' :
-              page === 'recent' ? 'Songs you play will show up here.' :
-              page === 'library' && tracks.length ?
-                'Try changing the search or filters.' : connectionStatus}</Text></View>} />
+
         </>}
-      </ScrollView>
+        </>} />
       </Animated.View>
       {wide && width >= 1120 && page !== 'nowPlaying' && <View style={s.rightRail}>
         <View style={s.railHeading}><Text style={s.railTitle}>Now playing</Text>
@@ -1252,7 +1289,7 @@ export default function App() {
       <View style={[s.playerMainRow, !wide && s.playerMainRowCompact]}>
       <View style={s.nowPlaying}>
         <Pressable accessibilityRole="button" accessibilityLabel="Open now playing"
-          onPress={() => setPage('nowPlaying')} style={s.nowPlayingLink}>
+          hoverAnimation={false} onPress={() => setPage('nowPlaying')} style={s.nowPlayingLink}>
           <Cover track={selected} large />
           <View style={s.trackText}>
             <Text numberOfLines={1} style={s.playerTitle}>{selected?.title ?? 'Choose a song'}</Text>
@@ -1262,8 +1299,10 @@ export default function App() {
         {selected && <View style={s.stickyActions}>
           <RowAction icon={favorites.includes(selected.id) ? 'favoriteFilled' : 'favorite'}
             label={`${favorites.includes(selected.id) ? 'Remove' : 'Add'} current song favorite`}
-            active={favorites.includes(selected.id)} onPress={() => toggleFavorite(selected.id)} />
+            active={favorites.includes(selected.id)} hoverAnimation={false}
+            onPress={() => toggleFavorite(selected.id)} />
           <RowAction icon="playlist" label="Add current song to playlist"
+            hoverAnimation={false}
             onPress={() => { setPlaylistPickerTrackId(selected.id); setPage('playlists'); }} />
         </View>}
       </View>
@@ -1271,7 +1310,7 @@ export default function App() {
       <View style={s.transport}>
         <Pressable accessibilityRole="button" accessibilityLabel={`Repeat ${queue.repeat}`}
           accessibilityHint="Cycles through off, all songs, and one song"
-          onPress={cycleRepeat} style={s.repeatButton}>
+          hoverAnimation={false} onPress={cycleRepeat} style={s.repeatButton}>
           <Icon name={queue.repeat === 'one' ? 'repeatOne' : 'repeatAll'} size={19}
             color={queue.repeat === 'off' ? c.muted : c.accent} />
         </Pressable>
@@ -1288,11 +1327,11 @@ export default function App() {
           <Icon name="next" size={20} color={c.muted} />
         </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={`Playback speed ${speed}x`}
-          onPress={cycleSpeed} style={s.extraControl}><Icon name="speed" size={16} color={c.muted} />
+          hoverAnimation={false} onPress={cycleSpeed} style={s.extraControl}><Icon name="speed" size={16} color={c.muted} />
           <Text style={s.extraControlText}>{speed}×</Text></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={sleepUntil ?
           `Sleep timer ${Math.ceil(sleepRemaining / 60)} minutes remaining` : 'Sleep timer off'}
-          onPress={cycleSleepTimer} style={s.extraControl}><Icon name="timer" size={16}
+          hoverAnimation={false} onPress={cycleSleepTimer} style={s.extraControl}><Icon name="timer" size={16}
             color={sleepUntil ? c.accent : c.muted} />
           <Text style={s.extraControlText}>{sleepUntil ? `${Math.ceil(sleepRemaining / 60)}m` : 'Off'}</Text></Pressable>
       </View>
@@ -1300,19 +1339,25 @@ export default function App() {
       {wide && <View style={s.playerRight}>
         <View style={s.volumeRow}><Icon name="volume" size={17} color={c.muted} />
           <Pressable accessibilityRole="adjustable" accessibilityLabel="Volume"
+            hoverAnimation={false}
             accessibilityValue={{ min: 0, max: 100, now: Math.round(volume * 100) }}
             onLayout={event => setVolumeWidth(event.nativeEvent.layout.width)}
             onPress={event => changeVolume(event.nativeEvent.locationX / volumeWidth)}
-            style={s.volumeTrack}><View style={[s.volumeFill, { width: `${volume * 100}%` }]} /></Pressable>
+            style={s.volumeTrack}><View style={[s.volumeFill, { width: `${volume * 100}%` }]}>
+              <View style={s.volumeKnob} />
+            </View></Pressable>
           <Text style={s.volumeValue}>{Math.round(volume * 100)}%</Text></View></View>}
       </View>
       <View style={s.playerProgressRow}>
         <Text style={s.time}>{clock(position)}</Text>
         <Pressable accessibilityRole="button" accessibilityLabel="Seek in song"
+          hoverAnimation={false}
           onLayout={event => setProgressWidth(event.nativeEvent.layout.width)}
           onPress={event => seekTo(duration * event.nativeEvent.locationX / progressWidth)}
           style={s.progressTrack}>
-          <View style={[s.progressFill, { width: `${duration ? Math.min(100, position / duration * 100) : 0}%` }]} />
+          <View style={[s.progressFill, { width: `${duration ? Math.min(100, position / duration * 100) : 0}%` }]}>
+            <View style={s.progressKnob} />
+          </View>
         </Pressable>
         <Text style={s.time}>{clock(duration)}</Text>
       </View>
@@ -1320,10 +1365,10 @@ export default function App() {
   </View></ArtworkContext.Provider>;
 }
 
-function RowAction({ icon, label, active = false, disabled = false, onPress }:
-  { icon: IconName; label: string; active?: boolean; disabled?: boolean; onPress: () => void }) {
+function RowAction({ icon, label, active = false, disabled = false, hoverAnimation, onPress }:
+  { icon: IconName; label: string; active?: boolean; disabled?: boolean; hoverAnimation?: boolean; onPress: () => void }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
-    onPress={onPress} style={[s.rowAction, disabled && s.rowActionDisabled]}>
+    hoverAnimation={hoverAnimation} onPress={onPress} style={[s.rowAction, disabled && s.rowActionDisabled]}>
     <Icon name={icon} size={16} color={active ? c.accent : c.muted} />
   </Pressable>;
 }
@@ -1447,7 +1492,7 @@ function Nav({ icon, label, active, onPress }: { icon: IconName; label: string; 
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: c.bg },
   body: { flex: 1, flexDirection: 'row' },
-  sidebar: { width: 218, padding: 18, backgroundColor: '#0c1118', borderRightWidth: 1, borderColor: c.line },
+  sidebar: { width: 218, padding: 18, backgroundColor: '#0c1118' },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 38 },
   brandMark: { width: 43, height: 43, borderRadius: 22 },
   brand: { color: c.text, fontSize: 21, fontWeight: '800', letterSpacing: -0.7 },
@@ -1459,9 +1504,8 @@ const s = StyleSheet.create({
   collectionTitle: { color: c.text, fontSize: 12, fontWeight: '700' },
   collectionCount: { color: c.muted, fontSize: 11, marginTop: 3 },
   sidebarBottom: { marginTop: 'auto' },
-  cacheCard: { backgroundColor: c.raised, borderRadius: 11, padding: 12, borderWidth: 1, borderColor: c.line },
-  offlineCard: { backgroundColor: c.panel, borderRadius: 11, padding: 12, marginBottom: 14,
-    borderWidth: 1, borderColor: c.line },
+  cacheCard: { backgroundColor: c.raised, borderRadius: 11, padding: 12 },
+  offlineCard: { backgroundColor: c.panel, borderRadius: 11, padding: 12, marginBottom: 14 },
   offlineHeading: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   compactCache: { marginBottom: 16 },
   storageRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 15 },
@@ -1491,16 +1535,14 @@ const s = StyleSheet.create({
   main: { flex: 1, minHeight: 0, paddingHorizontal: 26, paddingTop: 24 },
   pageScroll: { flex: 1 },
   pageScrollContent: { paddingBottom: 30 },
-  songList: { flexGrow: 0, marginBottom: 10 },
-  groupList: { flexGrow: 0, marginBottom: 10 },
   topLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   breadcrumb: { color: c.accent, fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
   topStatus: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: c.panel,
-    borderWidth: 1, borderColor: c.line, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 20 },
+    paddingVertical: 7, paddingHorizontal: 10, borderRadius: 20 },
   topStatusText: { color: c.muted, fontSize: 11, fontWeight: '600' },
   heading: { color: c.text, fontSize: 32, fontWeight: '800', letterSpacing: -1.1 },
   subtitle: { color: c.muted, fontSize: 13, marginTop: 5, marginBottom: 20 },
-  search: { width: 260, backgroundColor: c.panel, borderColor: c.line, borderWidth: 1, borderRadius: 9,
+  search: { width: 260, backgroundColor: c.raised, borderRadius: 9,
     color: c.text, paddingHorizontal: 14, paddingVertical: 8, fontSize: 12 },
   groupSearch: { width: '100%', marginBottom: 14 },
   connectRow: { flexDirection: 'row', gap: 10 },
@@ -1508,8 +1550,7 @@ const s = StyleSheet.create({
   connectButton: { height: 42, paddingHorizontal: 18, borderRadius: 9, backgroundColor: c.accent,
     alignItems: 'center', justifyContent: 'center' },
   connectButtonText: { color: c.bg, fontWeight: '800' },
-  setupPanel: { backgroundColor: c.panel, borderColor: c.line, borderWidth: 1,
-    borderRadius: 12, padding: 16, marginBottom: 16 },
+  setupPanel: { backgroundColor: c.panel, borderRadius: 12, padding: 16, marginBottom: 16 },
   setupTitle: { color: c.text, fontSize: 16, fontWeight: '700', marginBottom: 6 },
   setupHelp: { color: c.muted, fontSize: 13 },
   authError: { color: '#ffaaa8', fontSize: 13 },
@@ -1519,15 +1560,21 @@ const s = StyleSheet.create({
   accountText: { color: '#82dfb9', fontSize: 11, fontWeight: '700' },
   accountAction: { color: c.muted, fontSize: 11, fontWeight: '600' },
   playbackAlert: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 12, marginBottom: 15,
-    backgroundColor: '#3a252d', borderColor: '#80525f', borderWidth: 1, borderRadius: 11 },
+    backgroundColor: '#3a252d', borderRadius: 11 },
+  connectionRecovery: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 12, marginBottom: 15,
+    backgroundColor: c.panel, borderRadius: 11 },
+  recoveryCopy: { flex: 1 },
+  recoveryTitle: { color: c.text, fontSize: 12, fontWeight: '800' },
+  recoveryDetail: { color: c.muted, fontSize: 11, marginTop: 3 },
+  recoveryAction: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11,
+    paddingVertical: 8, backgroundColor: c.raised, borderRadius: 8 },
   alertCopy: { flex: 1 },
   alertTitle: { color: '#ffd6db', fontSize: 12, fontWeight: '800' },
   alertDetail: { color: '#e4b8c2', fontSize: 11, marginTop: 3 },
   alertAction: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11,
     paddingVertical: 8, backgroundColor: '#5a3745', borderRadius: 8 },
   alertActionText: { color: c.soft, fontSize: 11, fontWeight: '700' },
-  playlistPanel: { backgroundColor: c.panel, borderWidth: 1, borderColor: c.line,
-    borderRadius: 12, padding: 15, marginBottom: 16 },
+  playlistPanel: { backgroundColor: c.panel, borderRadius: 12, padding: 15, marginBottom: 16 },
   panelEyebrow: { color: c.soft, fontSize: 10, fontWeight: '800', letterSpacing: 1.1, marginBottom: 10 },
   panelHelp: { color: c.muted, fontSize: 12, marginTop: 8 },
   playlistCreateRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -1536,15 +1583,14 @@ const s = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 5 },
   smallPrimaryText: { color: c.bg, fontSize: 12, fontWeight: '800' },
   smallSecondary: { height: 36, paddingHorizontal: 10, borderRadius: 8, backgroundColor: c.raised,
-    borderWidth: 1, borderColor: c.line, flexDirection: 'row', alignItems: 'center', gap: 5 },
+    flexDirection: 'row', alignItems: 'center', gap: 5 },
   smallSecondaryText: { color: c.soft, fontSize: 11, fontWeight: '700' },
   smallDanger: { height: 36, width: 36, borderRadius: 8, backgroundColor: '#54313c',
     alignItems: 'center', justifyContent: 'center' },
   playlistTabs: { marginTop: 12 },
   playlistTab: { flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 8,
-    paddingHorizontal: 11, height: 34, backgroundColor: c.raised, borderWidth: 1,
-    borderColor: c.line, marginRight: 7, maxWidth: 200 },
-  playlistTabActive: { backgroundColor: '#3b3228', borderColor: c.accent },
+    paddingHorizontal: 11, height: 34, backgroundColor: c.raised, marginRight: 7, maxWidth: 200 },
+  playlistTabActive: { backgroundColor: '#3b3228' },
   playlistTabText: { color: c.text, fontSize: 11, fontWeight: '700', flexShrink: 1 },
   playlistTabCount: { color: c.muted, fontSize: 10 },
   playlistEditRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 12, flexWrap: 'wrap' },
@@ -1556,7 +1602,7 @@ const s = StyleSheet.create({
   channelItem: { paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: c.line },
   channelText: { color: c.text, fontSize: 13 },
   hero: { minHeight: 194, backgroundColor: '#152a38', borderRadius: 18, marginBottom: 24,
-    overflow: 'hidden', flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: '#294354' },
+    overflow: 'hidden', flexDirection: 'row', alignItems: 'center' },
   heroAccent: { width: 6, alignSelf: 'stretch', backgroundColor: c.accent },
   heroCopy: { flex: 1, paddingVertical: 22, paddingLeft: 26, paddingRight: 8 },
   heroEyebrow: { color: c.soft, fontSize: 10, fontWeight: '800', letterSpacing: 1.5, marginBottom: 8 },
@@ -1570,7 +1616,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 8, paddingVertical: 5 },
   heroArt: { width: 184, alignItems: 'center', justifyContent: 'center', marginRight: 16 },
   recordArt: { width: 164, height: 164, borderRadius: 12, overflow: 'hidden',
-    justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#ffffff24' },
+    justifyContent: 'center', alignItems: 'center' },
   recordArtLarge: { width: 240, height: 240, borderRadius: 15 },
   recordArtCompact: { width: 134, height: 104, borderRadius: 8 },
   recordCircle: { width: 126, height: 126, borderRadius: 63, backgroundColor: '#0b141f',
@@ -1620,7 +1666,7 @@ const s = StyleSheet.create({
   backLink: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', marginBottom: 12 },
   backLinkText: { color: c.soft, fontSize: 12, fontWeight: '700' },
   nowPage: { flexDirection: 'row', gap: 28, alignItems: 'center', padding: 24, marginBottom: 24,
-    borderRadius: 18, backgroundColor: '#14212d', borderWidth: 1, borderColor: '#294354' },
+    borderRadius: 18, backgroundColor: '#14212d' },
   nowPageCompact: { flexDirection: 'column', alignItems: 'stretch' },
   nowPageCopy: { flex: 1 },
   nowPageTitle: { color: c.text, fontSize: 28, fontWeight: '800', marginBottom: 6 },
@@ -1632,22 +1678,22 @@ const s = StyleSheet.create({
   toolbarActions: { flexDirection: 'row', alignItems: 'center', gap: 9 },
   toolbarActionsCompact: { width: '100%' },
   syncButton: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 36, paddingHorizontal: 12,
-    backgroundColor: c.raised, borderRadius: 9, borderWidth: 1, borderColor: c.line },
+    backgroundColor: c.raised, borderRadius: 9 },
   syncButtonDisabled: { opacity: 0.5 },
   syncButtonText: { color: c.soft, fontSize: 12, fontWeight: '700' },
   searchBox: { flexDirection: 'row', alignItems: 'center', gap: 8, width: 240, height: 36,
-    backgroundColor: c.panel, borderColor: c.line, borderWidth: 1, borderRadius: 9, paddingHorizontal: 12 },
+    backgroundColor: c.raised, borderRadius: 9, paddingHorizontal: 12 },
   searchField: { flex: 1, color: c.text, paddingVertical: 4, fontSize: 12 },
   section: { color: c.text, fontSize: 18, fontWeight: '800' },
   sectionSub: { color: c.muted, fontSize: 11, marginTop: 2 },
   searchCompact: { flex: 1 },
   filterBar: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginBottom: 12 },
-  artistFilter: { color: c.text, backgroundColor: c.raised, borderWidth: 1, borderColor: c.line,
-    borderRadius: 18, width: 165, paddingHorizontal: 11, paddingVertical: 5, fontSize: 11 },
-  filterChip: { backgroundColor: c.raised, borderWidth: 1, borderColor: c.line, borderRadius: 18,
+  artistFilter: { color: c.text, backgroundColor: c.raised, borderRadius: 18, width: 165,
+    paddingHorizontal: 11, paddingVertical: 5, fontSize: 11 },
+  filterChip: { backgroundColor: c.raised, borderRadius: 18,
     paddingHorizontal: 11, paddingVertical: 6, maxWidth: 220 },
   filterText: { color: c.soft, fontSize: 11, fontWeight: '600' },
-  tableHead: { flexDirection: 'row', alignItems: 'center', height: 32, borderBottomWidth: 1, borderBottomColor: c.line, marginBottom: 5 },
+  tableHead: { flexDirection: 'row', alignItems: 'center', height: 32, marginBottom: 5 },
   tableNumber: { color: '#7b899f', width: 30, fontSize: 10, paddingLeft: 10 },
   tableCover: { width: 50 },
   tableTitle: { color: '#7b899f', flex: 1, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
@@ -1675,11 +1721,11 @@ const s = StyleSheet.create({
   trackArtist: { color: c.muted, fontSize: 11, marginTop: 3 },
   rowSize: { color: c.muted, fontSize: 11, width: 100 },
   rowDuration: { color: c.muted, fontSize: 11, width: 43, textAlign: 'right' },
-  emptyCard: { alignItems: 'center', padding: 36, marginTop: 18, borderWidth: 1, borderColor: c.line, borderRadius: 14, backgroundColor: c.panel },
+  emptyCard: { alignItems: 'center', padding: 36, marginTop: 18, borderRadius: 14, backgroundColor: c.panel },
   emptyTitle: { color: c.text, fontSize: 15, fontWeight: '700' },
   empty: { color: c.muted, fontSize: 12, marginTop: 5, textAlign: 'center' },
   playerBar: { height: 92, paddingHorizontal: 22, paddingTop: 6, paddingBottom: 4,
-    backgroundColor: c.panel, borderTopWidth: 1, borderColor: c.line },
+    backgroundColor: '#0b0f14' },
   playerBarCompact: { height: 145, paddingTop: 8 },
   playerMainRow: { flex: 1, flexDirection: 'row', alignItems: 'center', minHeight: 0 },
   playerMainRowCompact: { flexDirection: 'column', alignItems: 'stretch' },
@@ -1691,8 +1737,10 @@ const s = StyleSheet.create({
   transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 46, gap: 3 },
   playerProgressRow: { flexDirection: 'row', alignItems: 'center', gap: 9, height: 19 },
   progressRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 1 },
-  progressTrack: { flex: 1, height: 6, backgroundColor: c.raised, borderRadius: 3 },
-  progressFill: { height: 6, backgroundColor: c.accent, borderRadius: 3 },
+  progressTrack: { flex: 1, height: 4, backgroundColor: '#4b5560', borderRadius: 2 },
+  progressFill: { height: 4, backgroundColor: c.accent, borderRadius: 2, position: 'relative' },
+  progressKnob: { position: 'absolute', right: -5, top: -4, width: 12, height: 12,
+    borderRadius: 6, backgroundColor: c.text },
   time: { color: c.muted, fontSize: 10, width: 35, textAlign: 'center' },
   transportButton: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
   extraControl: { width: 50, height: 34, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
@@ -1713,7 +1761,9 @@ const s = StyleSheet.create({
   railQueue: { flex: 1 },
   railQueueRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 5, gap: 2 },
   volumeRow: { width: 155, flexDirection: 'row', alignItems: 'center', gap: 7 },
-  volumeTrack: { flex: 1, height: 5, backgroundColor: c.raised, borderRadius: 3 },
-  volumeFill: { height: 5, backgroundColor: c.accent, borderRadius: 3 },
+  volumeTrack: { flex: 1, height: 4, backgroundColor: '#4b5560', borderRadius: 2 },
+  volumeFill: { height: 4, backgroundColor: c.accent, borderRadius: 2, position: 'relative' },
+  volumeKnob: { position: 'absolute', right: -5, top: -4, width: 12, height: 12,
+    borderRadius: 6, backgroundColor: c.text },
   volumeValue: { color: c.muted, fontSize: 10, width: 29, textAlign: 'right' },
 });

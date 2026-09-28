@@ -4,7 +4,7 @@
 
 import React from 'react';
 import ReactTestRenderer from 'react-test-renderer';
-import { Image, Linking, NativeModules, Platform } from 'react-native';
+import { FlatList, Image, Linking, NativeModules, Platform } from 'react-native';
 import App from '../App';
 import { Icon } from '../src/components/Icon';
 
@@ -82,6 +82,7 @@ test('connects automatically to the local bridge and loads a selected channel', 
     await ReactTestRenderer.act(async () => {
       await renderer.root.findByProps({ accessibilityLabel: 'Choose My Music' }).props.onPress();
     });
+    expect(renderer.root.findAllByType(FlatList)).toHaveLength(1);
     expect(renderer.root.findByProps({ accessibilityLabel: 'Play Song' })).toBeTruthy();
     await ReactTestRenderer.act(async () => {
       await renderer.root.findByProps({ accessibilityLabel: 'Play Song' }).props.onPress();
@@ -270,5 +271,48 @@ test('starts sign-in in the app and shows the Telegram code prompt', async () =>
   } finally {
     await ReactTestRenderer.act(async () => { renderer?.unmount(); });
     fetchMock.mockRestore();
+  }
+});
+
+test('reconnects an offline saved library without signing out', async () => {
+  const originalPlatform = Platform.OS;
+  (Platform as { OS: string }).OS = 'windows';
+  let online = false;
+  let reconnects = 0;
+  const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+    const path = String(url);
+    let data: object;
+    if (path.endsWith('/bootstrap')) data = { address: 'http://127.0.0.1:43127?token=testtoken' };
+    else if (path.includes('/status?')) data = { authenticated: online, online,
+      step: online ? 'authorized' : 'connecting', error: '', channel: 'Saved music',
+      trackCount: 1, selected: online, indexing: false, syncing: false,
+      catalogRevision: 1, cache: { bytes: 0, limitBytes: 32 * 1048576, chunks: 0 },
+      unavailableTrackIds: [] };
+    else if (path.includes('/reconnect?')) {
+      expect(options?.method).toBe('POST');
+      reconnects++;
+      online = true;
+      data = { online: false, step: 'connecting' };
+    } else if (path.includes('/library?')) data = { channel: 'Saved music', channelId: '-100123',
+      online, catalogRevision: 1, unavailableTrackIds: [], tracks: [{ messageId: 7,
+        title: 'Saved Song', artist: 'Artist', durationSeconds: 120, fileSize: 1000,
+        mimeType: 'audio/mpeg' }] };
+    else if (path.includes('/collections?')) data = { channelId: '-100123', favorites: [],
+      playlists: [], queue: { trackIds: ['7'], currentTrackId: null, repeat: 'off' } };
+    else throw new Error(`Unexpected request: ${path}`);
+    return { ok: true, json: async () => data } as Response;
+  });
+  let renderer!: ReactTestRenderer.ReactTestRenderer;
+  try {
+    await ReactTestRenderer.act(async () => { renderer = ReactTestRenderer.create(<App />); });
+    const reconnect = renderer.root.findByProps({ accessibilityLabel: 'Reconnect to Telegram' });
+    await ReactTestRenderer.act(async () => { await reconnect.props.onPress(); });
+    expect(reconnects).toBe(1);
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Play Saved Song' })).toBeTruthy();
+    expect(renderer.root.findAllByProps({ accessibilityLabel: 'Reconnect to Telegram' })).toHaveLength(0);
+  } finally {
+    await ReactTestRenderer.act(async () => { renderer?.unmount(); });
+    fetchMock.mockRestore();
+    (Platform as { OS: string }).OS = originalPlatform;
   }
 });

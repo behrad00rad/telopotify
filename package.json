@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node --test --test-isolation=none TelopotifyApp/src/core/*.test.mjs spikes/range-stream/*.test.mjs spikes/telegram-client/*.test.mjs",
     "app:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-windows.ps1",
+    "icons:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-windows-icons.ps1",
     "spike:telegram": "node spikes/telegram-client/probe.mjs",
     "dev:library": "node spikes/telegram-client/library-server.mjs"
   },

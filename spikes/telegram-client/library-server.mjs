@@ -57,6 +57,21 @@ let reconnecting = false;
 let restoreAttempts = 0;
 let restoreTimer = null;
 let restoreEpoch = 0;
+let reconnectTask = null;
+let healthFailures = 0;
+let healthChecking = false;
+
+async function withTimeout(promise, milliseconds) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Telegram request timed out')), milliseconds);
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
 
 function newClient(session = '') {
   return new TelegramClient(new StringSession(session), API_ID, API_HASH, { connectionRetries: 3 });
@@ -209,35 +224,44 @@ async function restoreSavedSession() {
   const candidate = newClient(session);
   client = candidate;
   try {
-    await candidate.connect();
-    await candidate.getMe();
+    await withTimeout(candidate.connect(), 20_000);
+    await withTimeout(candidate.getMe(), 20_000);
     if (epoch !== restoreEpoch) {
-      await candidate.disconnect().catch(() => {});
+      await withTimeout(candidate.disconnect(), 5000).catch(() => {});
       if (client === candidate) client = null;
       return;
     }
+    let choices = null;
+    if (selectedChannelId) {
+      choices = (await withTimeout(candidate.getDialogs({ limit: 100 }), 20_000))
+        .filter(item => item.isChannel);
+      if (epoch !== restoreEpoch) {
+        await withTimeout(candidate.disconnect(), 5000).catch(() => {});
+        if (client === candidate) client = null;
+        return;
+      }
+      const index = choices.findIndex(item => String(item.id) === selectedChannelId);
+      if (index >= 0) {
+        selectedDialog = choices[index];
+      } else console.warn('Saved channel is no longer accessible. Choose another channel in the app.');
+    }
+    dialogs = choices;
     authenticated = true;
     reconnecting = false;
+    healthFailures = 0;
     restoreAttempts = 0;
     console.log('Saved Telegram session restored.');
-    if (selectedChannelId) {
-      try {
-        const choices = await channels();
-        const index = choices.findIndex(item => String(item.id) === selectedChannelId);
-        if (index >= 0) {
-          selectedDialog = choices[index];
-          await syncSelectedChannel();
-        }
-      } catch { console.warn('Could not refresh the saved channel. Choose it again in the app.'); }
-    }
+    if (selectedDialog) syncSelectedChannel().catch(() => console.warn('Channel sync will retry later.'));
   } catch (error) {
-    await candidate.disconnect().catch(() => {});
+    await withTimeout(candidate.disconnect(), 5000).catch(() => {});
     if (epoch !== restoreEpoch) {
       if (client === candidate) client = null;
       return;
     }
     if (client === candidate) client = null;
     authenticated = false;
+    selectedDialog = null;
+    dialogs = null;
     if (!shouldRetryRestore(error)) {
       reconnecting = false;
       console.warn('Saved Telegram session needs renewal.');
@@ -269,10 +293,36 @@ async function restoreSession() {
   await restoreSavedSession();
 }
 
+async function reconnectSavedSession() {
+  if (reconnectTask) return;
+  healthFailures = 0;
+  reconnecting = true;
+  restoreEpoch++;
+  if (restoreTimer) clearTimeout(restoreTimer);
+  restoreTimer = null;
+  restoreAttempts = 0;
+  const old = client;
+  client = null;
+  authenticated = false;
+  selectedDialog = null;
+  dialogs = null;
+  reconnectTask = (async () => {
+    if (old) await withTimeout(old.disconnect(), 5000).catch(() => {});
+    await restoreSavedSession();
+  })().catch(() => {
+    reconnecting = false;
+    console.warn('Could not reconnect the saved Telegram session.');
+  }).finally(() => { reconnectTask = null; });
+}
+
+function isTelegramOnline() {
+  return Boolean(authenticated && selectedDialog && client?.connected && !reconnecting && !healthFailures);
+}
+
 function status() {
   const flow = authFlow?.state();
   return {
-    authenticated, online: Boolean(authenticated && selectedDialog && client?.connected),
+    authenticated, online: isTelegramOnline(),
     step: initializing || reconnecting ? 'connecting' : authenticated ? 'authorized' : flow?.step ?? 'phone',
     error: flow?.error ?? '', channel, trackCount: tracks.length,
     selected: Boolean(selectedDialog), indexing, syncing, catalogRevision,
@@ -292,6 +342,7 @@ async function logout() {
   if (restoreTimer) clearTimeout(restoreTimer);
   restoreTimer = null;
   reconnecting = false;
+  healthFailures = 0;
   initializing = false;
   authFlow?.cancel();
   authFlow = null;
@@ -337,6 +388,11 @@ async function handle(request, response) {
     if (url.pathname === '/status' && request.method === 'GET') {
       return json(response, 200, status());
     }
+    if (url.pathname === '/reconnect' && request.method === 'POST') {
+      if (authFlow && !authenticated) return json(response, 409, { error: 'Finish sign-in first' });
+      reconnectSavedSession();
+      return json(response, 202, status());
+    }
     if (url.pathname === '/auth/start' && request.method === 'POST') {
       if (authenticated || initializing) return json(response, 409, { error: 'Sign-in is not available now' });
       restoreEpoch++;
@@ -349,6 +405,7 @@ async function handle(request, response) {
         authFlow = createAuthFlow(client, async () => {
           await saveSession(SESSION_PATH, client.session.save());
           authenticated = true;
+          authFlow = null;
         });
       }
       authFlow.begin(phone);
@@ -376,7 +433,7 @@ async function handle(request, response) {
     }
     if (url.pathname === '/library' && request.method === 'GET') {
       return json(response, 200, { channel, channelId: selectedChannelId, tracks,
-        catalogRevision, online: Boolean(authenticated && selectedDialog && client?.connected),
+        catalogRevision, online: isTelegramOnline(),
         unavailableTrackIds: [...unavailable] });
     }
     if (url.pathname === '/library/sync' && request.method === 'POST') {
@@ -496,7 +553,7 @@ async function handle(request, response) {
       stream.on('error', () => response.destroy());
       return stream.pipe(response);
     }
-    if (!authenticated || !selectedDialog || !client?.connected) {
+    if (!isTelegramOnline()) {
       return json(response, 503, { error: 'Connect to Telegram or pin this song for offline playback' });
     }
     if (unavailable.has(id)) return json(response, 404, { error: 'Song is no longer available' });
@@ -561,12 +618,28 @@ async function main() {
   console.log('Keep this terminal running. Ctrl+C stops the bridge.');
   restoreSession().catch(() => { initializing = false; console.warn('Could not restore Telegram session.'); });
   const syncTimer = setInterval(() => {
-    if (authenticated && selectedDialog && !indexing && !syncing) {
+    if (isTelegramOnline() && !indexing && !syncing) {
       syncSelectedChannel().catch(() => console.warn('Channel sync will retry later.'));
     }
   }, SYNC_INTERVAL_MS);
+  const healthTimer = setInterval(async () => {
+    if (initializing || reconnecting || !authenticated || healthChecking) return;
+    healthChecking = true;
+    try {
+      if (!client?.connected) throw new Error('Telegram connection closed');
+      await withTimeout(client.invoke(new Api.updates.GetState()), 10_000);
+      healthFailures = 0;
+    } catch {
+      healthFailures++;
+      if (healthFailures >= 2) {
+        console.warn('Telegram connection stopped responding. Reconnecting saved session.');
+        reconnectSavedSession();
+      }
+    } finally { healthChecking = false; }
+  }, 15_000);
   process.on('SIGINT', async () => {
     clearInterval(syncTimer);
+    clearInterval(healthTimer);
     server.close();
     await client?.disconnect().catch(() => {});
     await unlink(CONNECTION_PATH).catch(() => {});
