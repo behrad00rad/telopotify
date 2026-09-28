@@ -6,7 +6,31 @@ import React
 // suspend the current song.
 @objc(TelopotifyAudio)
 final class TelopotifyAudio: NSObject {
+  private struct QueueTrack {
+    let messageId: String
+    let fileId: Int
+    let fileSize: Int64
+    let mimeType: String
+    let title: String
+    let artist: String
+
+    init?(_ value: [String: Any]) {
+      guard let messageId = value["messageId"] as? String,
+            let fileId = value["fileId"] as? NSNumber,
+            let fileSize = value["fileSize"] as? NSNumber,
+            fileId.intValue > 0, fileSize.int64Value > 0 else { return nil }
+      self.messageId = messageId
+      self.fileId = fileId.intValue
+      self.fileSize = fileSize.int64Value
+      self.mimeType = value["mimeType"] as? String ?? "audio/mpeg"
+      self.title = value["title"] as? String ?? "Untitled"
+      self.artist = value["artist"] as? String ?? ""
+    }
+  }
+
   private let player = AVPlayer()
+  private var queue: [QueueTrack] = []
+  private var queueIndex = -1
   private var title = ""
   private var artist = ""
   private var desiredRate: Float = 1
@@ -33,6 +57,14 @@ final class TelopotifyAudio: NSObject {
     commands.changePlaybackPositionCommand.addTarget { [weak self] event in
       guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
       DispatchQueue.main.async { self?.seekOnMain(event.positionTime) }
+      return .success
+    }
+    commands.nextTrackCommand.addTarget { [weak self] _ in
+      DispatchQueue.main.async { self?.nextOnMain() }
+      return .success
+    }
+    commands.previousTrackCommand.addTarget { [weak self] _ in
+      DispatchQueue.main.async { self?.previousOnMain() }
       return .success
     }
     commands.nextTrackCommand.isEnabled = false
@@ -66,6 +98,9 @@ final class TelopotifyAudio: NSObject {
         return
       }
       if let endObserver = self.endObserver { NotificationCenter.default.removeObserver(endObserver) }
+      self.queue = []
+      self.queueIndex = -1
+      self.updateQueueCommands()
       self.streamLoader = nil
       self.title = title
       self.artist = artist
@@ -87,41 +122,102 @@ final class TelopotifyAudio: NSObject {
   func playTelegram(_ fileId: NSNumber, fileSize: NSNumber, mimeType: String,
                     title: String, artist: String) {
     DispatchQueue.main.async {
-      guard fileId.intValue > 0, fileSize.int64Value > 0,
-            TelopotifyTelegram.active != nil else {
-        self.errorMessage = "Telegram audio is unavailable"
-        return
-      }
-      do { try AVAudioSession.sharedInstance().setActive(true) }
-      catch {
-        self.errorMessage = "Audio session is unavailable: \(error.localizedDescription)"
-        return
-      }
-      let ext = mimeType.contains("mp4") || mimeType.contains("m4a") ? "m4a" : "mp3"
-      guard let url = URL(string: "telopotify-stream://audio/\(fileId.intValue).\(ext)") else {
-        self.errorMessage = "Invalid audio source"
-        return
-      }
-      let loader = TelegramStreamLoader(fileId: fileId.intValue,
-                                        fileSize: fileSize.int64Value, mimeType: mimeType)
-      let asset = AVURLAsset(url: url)
-      asset.resourceLoader.setDelegate(loader, queue: loader.queue)
-      let item = AVPlayerItem(asset: asset)
-      if let endObserver = self.endObserver { NotificationCenter.default.removeObserver(endObserver) }
-      self.streamLoader = loader
-      self.title = title
-      self.artist = artist
-      self.ended = false
-      self.errorMessage = nil
-      self.endObserver = NotificationCenter.default.addObserver(
-        forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
-      ) { [weak self] _ in
-        self?.ended = true
-        self?.updateNowPlaying()
-      }
-      self.player.replaceCurrentItem(with: item)
-      self.resumeOnMain()
+      self.queue = []
+      self.queueIndex = -1
+      self.updateQueueCommands()
+      self.playTelegramOnMain(fileId: fileId.intValue, fileSize: fileSize.int64Value,
+                              mimeType: mimeType, title: title, artist: artist)
     }
+  }
+
+  @objc(setQueue:startId:)
+  func setQueue(_ values: NSArray, startId: String) {
+    DispatchQueue.main.async {
+      let tracks = values.compactMap { ($0 as? [String: Any]).flatMap(QueueTrack.init) }
+      self.queue = tracks
+      self.queueIndex = tracks.firstIndex { $0.messageId == startId } ?? -1
+      self.updateQueueCommands()
+      if self.queueIndex >= 0 { self.playQueueIndexOnMain(self.queueIndex) }
+    }
+  }
+
+  @objc(appendQueue:)
+  func appendQueue(_ values: NSArray) {
+    DispatchQueue.main.async {
+      let known = Set(self.queue.map(\.messageId))
+      self.queue += values.compactMap { ($0 as? [String: Any]).flatMap(QueueTrack.init) }
+        .filter { !known.contains($0.messageId) }
+      self.updateQueueCommands()
+    }
+  }
+
+  @objc func next() { DispatchQueue.main.async { self.nextOnMain() } }
+  @objc func previous() { DispatchQueue.main.async { self.previousOnMain() } }
+
+  private func updateQueueCommands() {
+    let commands = MPRemoteCommandCenter.shared()
+    commands.nextTrackCommand.isEnabled = queueIndex >= 0 && queueIndex + 1 < queue.count
+    commands.previousTrackCommand.isEnabled = queueIndex > 0
+  }
+
+  private func playQueueIndexOnMain(_ index: Int) {
+    guard queue.indices.contains(index) else { return }
+    queueIndex = index
+    updateQueueCommands()
+    let track = queue[index]
+    playTelegramOnMain(fileId: track.fileId, fileSize: track.fileSize,
+                       mimeType: track.mimeType, title: track.title, artist: track.artist)
+  }
+
+  private func nextOnMain() {
+    if queueIndex + 1 < queue.count { playQueueIndexOnMain(queueIndex + 1) }
+  }
+
+  private func previousOnMain() {
+    if player.currentTime().seconds > 3 { seekOnMain(0) }
+    else if queueIndex > 0 { playQueueIndexOnMain(queueIndex - 1) }
+    else { seekOnMain(0) }
+  }
+
+  private func playTelegramOnMain(fileId: Int, fileSize: Int64, mimeType: String,
+                                  title: String, artist: String) {
+    guard fileId > 0, fileSize > 0, TelopotifyTelegram.active != nil else {
+      errorMessage = "Telegram audio is unavailable"
+      return
+    }
+    do { try AVAudioSession.sharedInstance().setActive(true) }
+    catch {
+      errorMessage = "Audio session is unavailable: \(error.localizedDescription)"
+      return
+    }
+    let ext = mimeType.contains("mp4") || mimeType.contains("m4a") ? "m4a" : "mp3"
+    guard let url = URL(string: "telopotify-stream://audio/\(fileId).\(ext)") else {
+      errorMessage = "Invalid audio source"
+      return
+    }
+    let loader = TelegramStreamLoader(fileId: fileId, fileSize: fileSize, mimeType: mimeType)
+    let asset = AVURLAsset(url: url)
+    asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+    let item = AVPlayerItem(asset: asset)
+    if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+    streamLoader = loader
+    self.title = title
+    self.artist = artist
+    ended = false
+    errorMessage = nil
+    endObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+    ) { [weak self] _ in
+      guard let self else { return }
+      if self.queueIndex >= 0 && self.queueIndex + 1 < self.queue.count {
+        self.nextOnMain()
+      } else {
+        self.ended = true
+        self.updateNowPlaying()
+      }
+    }
+    player.replaceCurrentItem(with: item)
+    resumeOnMain()
   }
 
   @objc func pause() { DispatchQueue.main.async { self.pauseOnMain() } }
@@ -130,6 +226,9 @@ final class TelopotifyAudio: NSObject {
     DispatchQueue.main.async {
       self.player.pause()
       self.player.replaceCurrentItem(with: nil)
+      self.queue = []
+      self.queueIndex = -1
+      self.updateQueueCommands()
       self.streamLoader = nil
       self.ended = false
       self.errorMessage = nil
@@ -172,6 +271,9 @@ final class TelopotifyAudio: NSObject {
       else if self.player.timeControlStatus == .playing { status = "playing" }
       else { status = "paused" }
       resolve(["status": status,
+               "messageId": self.queue.indices.contains(self.queueIndex) ? self.queue[self.queueIndex].messageId : "",
+               "title": self.title, "artist": self.artist,
+               "queueIndex": self.queueIndex, "queueCount": self.queue.count,
                "position": position.isFinite ? max(0, position) : 0,
                "duration": duration.isFinite ? max(0, duration) : 0])
     }

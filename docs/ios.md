@@ -28,10 +28,13 @@ TDLib sign-in module are in the repository. The iPhone app opens its own
 Telegram session in private app storage, independently of Windows, lists
 channels for selection, and pages through audio message metadata without
 downloading the files. The player requests bounded song byte ranges from TDLib
-as needed, including after a seek. This streaming path compiles in the hosted
-iOS build, but still needs device testing for playback, network recovery, and
-background behavior. Native queue advancement and a full mobile library UI
-are later milestones.
+as needed, including after a seek. The native queue now advances across loaded
+songs while JavaScript is suspended, with next/previous lock-screen commands.
+The iPhone library includes songs, artists, caption-labeled albums, likes,
+playlists stored on the phone, and Telegram cover thumbnails. Telegram audio
+metadata has no reliable album-name field; songs without an `Album:` caption
+are grouped as untagged. Multi-song background playback and network recovery
+still need device testing.
 Telegram's public sample API credentials are only for development. A dedicated
 API ID/hash are required before distribution.
 

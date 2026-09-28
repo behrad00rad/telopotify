@@ -215,10 +215,17 @@ final class TelopotifyTelegram: RCTEventEmitter {
               let fileId = file["id"] as? NSNumber else { return nil }
         let fileName = audio["file_name"] as? String ?? ""
         let title = audio["title"] as? String ?? ""
+        let cover = audio["album_cover_thumbnail"] as? [String: Any]
+        let externalCovers = audio["external_album_covers"] as? [[String: Any]] ?? []
+        let coverFile = (cover ?? externalCovers.first)?["file"] as? [String: Any]
+        let caption = (content["caption"] as? [String: Any])?["text"] as? String ?? ""
+        let album = caption.split(separator: "\n").first { $0.lowercased().hasPrefix("album:") }
+          .map { String($0.dropFirst(6)).trimmingCharacters(in: .whitespaces) } ?? ""
         return [
           "messageId": id.stringValue, "fileId": fileId.intValue,
           "title": title.isEmpty ? fileName : title,
           "artist": audio["performer"] as? String ?? "",
+          "album": album, "coverFileId": (coverFile?["id"] as? NSNumber)?.intValue ?? 0,
           "durationSeconds": audio["duration"] as? Int ?? 0,
           "fileSize": file["size"] as? Int ?? 0,
           "mimeType": audio["mime_type"] as? String ?? "",
@@ -230,6 +237,39 @@ final class TelopotifyTelegram: RCTEventEmitter {
         "hasMore": !messages.isEmpty,
       ])
     }
+  }
+
+  @objc(getArtwork:resolver:rejecter:)
+  func getArtwork(_ fileId: NSNumber, resolver resolve: @escaping RCTPromiseResolveBlock,
+                  rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard fileId.intValue > 0 else { resolve(NSNull()); return }
+    request(["@type": "downloadFile", "file_id": fileId.intValue,
+             "priority": 16, "offset": 0, "limit": 0, "synchronous": true]) { result in
+      guard let local = result["local"] as? [String: Any],
+            let path = local["path"] as? String, !path.isEmpty else {
+        reject("artwork", result["message"] as? String ?? "Cover unavailable", nil)
+        return
+      }
+      resolve(URL(fileURLWithPath: path).absoluteString)
+    }
+  }
+
+  @objc(getLibraryState:rejecter:)
+  func getLibraryState(_ resolve: RCTPromiseResolveBlock,
+                       rejecter reject: RCTPromiseRejectBlock) {
+    resolve(UserDefaults.standard.string(forKey: "telopotify.iosLibrary") ?? "{}")
+  }
+
+  @objc(saveLibraryState:resolver:rejecter:)
+  func saveLibraryState(_ value: String, resolver resolve: RCTPromiseResolveBlock,
+                        rejecter reject: RCTPromiseRejectBlock) {
+    guard value.utf8.count < 1_000_000,
+          (try? JSONSerialization.jsonObject(with: Data(value.utf8))) is [String: Any] else {
+      reject("library", "Invalid library state", nil)
+      return
+    }
+    UserDefaults.standard.set(value, forKey: "telopotify.iosLibrary")
+    resolve(true)
   }
 
   // AVAssetResourceLoader asks for one bounded range at a time. TDLib keeps

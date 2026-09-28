@@ -1,274 +1,384 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  NativeEventEmitter, NativeModules, Pressable, SafeAreaView, ScrollView, StatusBar,
-  StyleSheet, Text, TextInput, TouchableOpacity, View,
-} from 'react-native';
-import { Icon } from '../components/Icon';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import {FlatList, Image, Modal, NativeEventEmitter, NativeModules, Pressable,
+  SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput,
+  TouchableOpacity, View} from 'react-native';
+import {Icon, IconName} from '../components/Icon';
 
-type AuthState = { state: string; error?: string };
-type Channel = { id: string; title: string };
-type Track = { messageId: string; fileId: number; fileSize: number; mimeType: string;
-  title: string; artist: string; durationSeconds: number };
-type TrackPage = { tracks: Track[]; nextCursor: string; hasMore: boolean };
-type PlaybackSnapshot = { status: string; position: number; duration: number };
-type TelegramModule = {
-  start(): Promise<AuthState>;
-  getState(): Promise<AuthState>;
-  sendPhone(phone: string): Promise<unknown>;
-  sendCode(code: string): Promise<unknown>;
-  sendPassword(password: string): Promise<unknown>;
-  listChannels(): Promise<Channel[]>;
-  selectChannel(id: string): Promise<Channel>;
-  getSelectedChannel(): Promise<string | null>;
-  getTrackPage(cursor: string): Promise<TrackPage>;
+type Track = {messageId: string; fileId: number; fileSize: number; mimeType: string;
+  title: string; artist: string; album: string; coverFileId: number; durationSeconds: number};
+type Auth = {state: string; error?: string};
+type Channel = {id: string; title: string};
+type Page = {tracks: Track[]; nextCursor: string; hasMore: boolean};
+type Snapshot = {status: string; messageId: string; title: string; artist: string;
+  position: number; duration: number; queueIndex: number; queueCount: number};
+type Library = {liked: string[]; playlists: Record<string, string[]>};
+type Tab = 'Home' | 'Songs' | 'Artists' | 'Albums' | 'Playlists';
+const tg = NativeModules.TelopotifyTelegram as {
+  start(): Promise<Auth>; getState(): Promise<Auth>; sendPhone(v: string): Promise<void>;
+  sendCode(v: string): Promise<void>; sendPassword(v: string): Promise<void>;
+  listChannels(): Promise<Channel[]>; selectChannel(id: string): Promise<Channel>;
+  getSelectedChannel(): Promise<string | null>; getTrackPage(cursor: string): Promise<Page>;
+  getArtwork(id: number): Promise<string | null>;
+  getLibraryState(): Promise<string>; saveLibraryState(value: string): Promise<boolean>;
 };
-
-const telegram = NativeModules.TelopotifyTelegram as TelegramModule;
 const audio = NativeModules.TelopotifyAudio as {
-  playTelegram(fileId: number, fileSize: number, mimeType: string, title: string, artist: string): void;
-  pause(): void; resume(): void; seek(seconds: number): void;
-  getSnapshot(): Promise<PlaybackSnapshot>;
+  setQueue(tracks: Track[], startId: string): void; appendQueue(tracks: Track[]): void;
+  next(): void; previous(): void; pause(): void; resume(): void; seek(seconds: number): void;
+  getSnapshot(): Promise<Snapshot>;
 };
-const formatTime = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+const initial: Snapshot = {status: 'stopped', messageId: '', title: '', artist: '',
+  position: 0, duration: 0, queueIndex: -1, queueCount: 0};
+const artCache = new Map<number, string | null>();
+const artistOf = (t: Track) => t.artist?.trim() || 'Unknown artist';
+const albumOf = (t: Track) => t.album?.trim() || 'Singles & untagged';
+const time = (n: number) => `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, '0')}`;
+const nav: {name: Tab; icon: IconName}[] = [
+  {name: 'Home', icon: 'home'}, {name: 'Songs', icon: 'music'},
+  {name: 'Artists', icon: 'artist'}, {name: 'Albums', icon: 'album'},
+  {name: 'Playlists', icon: 'playlist'},
+];
+
+function Art({id, size, round = false}: {id: number; size: number; round?: boolean}) {
+  const [uri, setUri] = useState<string | null>(artCache.get(id) ?? null);
+  useEffect(() => {
+    let alive = true;
+    setUri(artCache.get(id) ?? null);
+    if (id > 0 && !artCache.has(id)) { tg.getArtwork(id).then(value => {
+      artCache.set(id, value); if (alive) { setUri(value); }
+    }).catch(() => { artCache.set(id, null); }); }
+    return () => { alive = false; };
+  }, [id]);
+  const shape = {width: size, height: size, borderRadius: round ? size / 2 : 7};
+  return <View style={[s.art, shape]}>{uri ?
+    <Image source={{uri}} style={shape} /> : <Icon name="music" size={size * 0.28} color="#8292a2" />}
+  </View>;
+}
+function Button({icon, label, onPress, color = '#eff3f7', size = 21}:
+  {icon: IconName; label: string; onPress: () => void; color?: string; size?: number}) {
+  return <TouchableOpacity accessibilityRole="button" accessibilityLabel={label}
+    style={s.iconButton} onPress={onPress}><Icon name={icon} color={color} size={size} /></TouchableOpacity>;
+}
 
 export default function IOSApp() {
-  const [auth, setAuth] = useState<AuthState>({ state: 'starting' });
-  const [input, setInput] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [channels, setChannels] = useState<Channel[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [loadingChannels, setLoadingChannels] = useState(false);
-  const [tracks, setTracks] = useState<Track[]>([]);
-  const [cursor, setCursor] = useState('');
-  const [hasMore, setHasMore] = useState(true);
-  const [loadingTracks, setLoadingTracks] = useState(false);
-  const loadingTracksRef = useRef(false);
-  const [nowPlaying, setNowPlaying] = useState<Track | null>(null);
-  const [playback, setPlayback] = useState<PlaybackSnapshot>({ status: 'stopped', position: 0, duration: 0 });
-  const [progressWidth, setProgressWidth] = useState(1);
+  const [auth, setAuth] = useState<Auth>({state: 'starting'});
+  const [input, setInput] = useState(''); const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(''); const [channels, setChannels] = useState<Channel[]>([]);
+  const [channel, setChannel] = useState<string | null>(null);
+  const [tracks, setTracks] = useState<Track[]>([]); const [cursor, setCursor] = useState('');
+  const [more, setMore] = useState(true); const [loading, setLoading] = useState(false);
+  const [tab, setTab] = useState<Tab>('Home'); const [scope, setScope] = useState<{name: string; tracks: Track[]} | null>(null);
+  const [search, setSearch] = useState(''); const [snapshot, setSnapshot] = useState<Snapshot>(initial);
+  const [nowOpen, setNowOpen] = useState(false); const [progressWidth, setProgressWidth] = useState(1);
+  const [library, setLibrary] = useState<Library>({liked: [], playlists: {}});
+  const [playlistName, setPlaylistName] = useState(''); const [addSong, setAddSong] = useState<Track | null>(null);
+  const loadingRef = useRef(false); const allQueueRef = useRef(false);
 
   useEffect(() => {
     const events = new NativeEventEmitter(NativeModules.TelopotifyTelegram);
-    const subscription = events.addListener('telegramState', (next: AuthState) => {
-      setAuth(next);
-      setError(next.error ?? '');
-      setInput('');
+    const sub = events.addListener('telegramState', (next: Auth) => {
+      setAuth(next); setError(next.error ?? ''); setInput('');
     });
-    telegram.start().then(setAuth).catch(e => setError(String(e)));
-    return () => subscription.remove();
+    tg.start().then(setAuth).catch(e => setError(String(e)));
+    tg.getLibraryState().then(raw => {
+      const saved = JSON.parse(raw) as Partial<Library>;
+      setLibrary({liked: saved.liked ?? [], playlists: saved.playlists ?? {}});
+    }).catch(() => {});
+    return () => sub.remove();
   }, []);
+  const ready = auth.state === 'authorizationStateReady';
+  const phone = auth.state === 'authorizationStateWaitPhoneNumber';
+  const code = auth.state === 'authorizationStateWaitCode';
+  const password = auth.state === 'authorizationStateWaitPassword';
+  const prompt = phone ? 'Phone number with country code' : code ? 'Telegram code' : 'Two-step password';
 
-  const state = auth.state;
-  const ready = state === 'authorizationStateReady';
-  const phone = state === 'authorizationStateWaitPhoneNumber';
-  const code = state === 'authorizationStateWaitCode';
-  const password = state === 'authorizationStateWaitPassword';
-  const acceptsInput = phone || code || password;
-  const prompt = phone ? 'Your Telegram phone number' : code ? 'Code from Telegram' : 'Two-step verification password';
-
-  async function refreshChannels() {
-    setLoadingChannels(true);
-    setError('');
-    try {
-      const [saved, available] = await Promise.all([
-        telegram.getSelectedChannel(), telegram.listChannels(),
-      ]);
-      setSelected(saved);
-      setChannels(available);
-    } catch (e) { setError(String(e)); }
-    finally { setLoadingChannels(false); }
-  }
-
-  useEffect(() => {
-    if (ready) { refreshChannels(); }
+  const refreshChannels = useCallback(async () => {
+    try { const [saved, available] = await Promise.all([tg.getSelectedChannel(), tg.listChannels()]);
+      setChannel(saved); setChannels(available); }
+    catch (e) { setError(String(e)); }
+  }, []);
+  useEffect(() => { if (ready) { refreshChannels(); } }, [ready, refreshChannels]);
+  const load = useCallback(async (from: string, replace = false) => {
+    if (loadingRef.current) { return; }
+    loadingRef.current = true; setLoading(true);
+    try { const page = await tg.getTrackPage(from);
+      setTracks(prev => replace ? page.tracks : [...prev, ...page.tracks]);
+      if (!replace && allQueueRef.current) { audio.appendQueue(page.tracks); }
+      setCursor(page.nextCursor); setMore(page.hasMore && !!page.nextCursor && page.nextCursor !== from);
+    } catch (e) { setError(String(e)); setMore(false); }
+    finally { loadingRef.current = false; setLoading(false); }
+  }, []);
+  useEffect(() => { if (ready && channel) { load('', true); } }, [ready, channel, load]);
+  useEffect(() => { if (channel && !loading && more && cursor) { load(cursor); } }, [channel, loading, more, cursor, load]);
+  useEffect(() => { if (!ready) { return; }
+    let alive = true;
+    const poll = () => audio.getSnapshot().then(value => { if (alive) { setSnapshot(value); } }).catch(() => {});
+    poll(); const timer = setInterval(poll, 1000);
+    return () => { alive = false; clearInterval(timer); };
   }, [ready]);
 
-  async function chooseChannel(channel: Channel) {
-    try {
-      await telegram.selectChannel(channel.id);
-      setSelected(channel.id);
-      setTracks([]);
-      setCursor('');
-      setHasMore(true);
-      setError('');
-    } catch (e) { setError(String(e)); }
-  }
+  const byId = useMemo(() => new Map(tracks.map(t => [t.messageId, t])), [tracks]);
+  const current = byId.get(snapshot.messageId);
+  const groups = useCallback((kind: 'artist' | 'album') => {
+    const map = new Map<string, Track[]>();
+    tracks.forEach(t => { const name = kind === 'artist' ? artistOf(t) : albumOf(t);
+      const group = map.get(name) ?? []; group.push(t); map.set(name, group); });
+    return [...map].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [tracks]);
+  const artists = useMemo(() => groups('artist'), [groups]);
+  const albums = useMemo(() => groups('album'), [groups]);
+  const visible = useMemo(() => { const source = scope?.tracks ?? tracks; const q = search.trim().toLowerCase();
+    return q ? source.filter(t => `${t.title} ${t.artist} ${t.album}`.toLowerCase().includes(q)) : source;
+  }, [scope, tracks, search]);
+  const likedTracks = library.liked.map(id => byId.get(id)).filter((t): t is Track => !!t);
 
-  const loadTracks = useCallback(async (from: string, replace = false) => {
-    if (loadingTracksRef.current) { return; }
-    loadingTracksRef.current = true;
-    setLoadingTracks(true);
-    try {
-      const page = await telegram.getTrackPage(from);
-      setTracks(previous => replace ? page.tracks : [...previous, ...page.tracks]);
-      setCursor(page.nextCursor);
-      setHasMore(page.hasMore && !!page.nextCursor && page.nextCursor !== from);
-    } catch (e) { setError(String(e)); }
-    finally { loadingTracksRef.current = false; setLoadingTracks(false); }
-  }, []);
+  const persist = (next: Library) => { setLibrary(next);
+    tg.saveLibraryState(JSON.stringify(next)).catch(e => setError(String(e))); };
+  const like = (t: Track) => persist({...library, liked: library.liked.includes(t.messageId)
+    ? library.liked.filter(id => id !== t.messageId) : [...library.liked, t.messageId]});
+  const createPlaylist = () => { const name = playlistName.trim();
+    if (!name || library.playlists[name] || name === 'Liked Songs') { return; }
+    persist({...library, playlists: {...library.playlists, [name]: []}}); setPlaylistName(''); };
+  const addTo = (name: string, t: Track) => { const ids = library.playlists[name] ?? [];
+    if (!ids.includes(t.messageId)) { persist({...library, playlists: {...library.playlists,
+      [name]: [...ids, t.messageId]}}); } setAddSong(null); };
+  const chooseTab = (name: Tab) => { setTab(name); setScope(null); setSearch(''); };
+  const openGroup = (name: string, group: Track[]) => { setScope({name, tracks: group}); setSearch(''); setTab('Songs'); };
+  const play = (t: Track, context: Track[]) => {
+    if (!t.fileId || !t.fileSize) { setError('This song is unavailable.'); return; }
+    allQueueRef.current = context === tracks;
+    audio.setQueue(context.filter(item => item.fileId > 0 && item.fileSize > 0), t.messageId);
+    setSnapshot({...initial, status: 'opening', messageId: t.messageId,
+      title: t.title, artist: t.artist, duration: t.durationSeconds});
+  };
+  const toggle = () => snapshot.status === 'playing' ? audio.pause() : audio.resume();
+  const seek = (x: number) => { const duration = snapshot.duration || current?.durationSeconds || 0;
+    if (duration > 0) { audio.seek(duration * Math.max(0, Math.min(1, x / progressWidth))); } };
+  const submit = async () => { if (!input.trim() || busy) { return; }
+    setBusy(true); setError('');
+    try { if (phone) { await tg.sendPhone(input.trim()); }
+      else if (code) { await tg.sendCode(input.trim()); }
+      else if (password) { await tg.sendPassword(input); } }
+    catch (e) { setError(String(e)); } finally { setBusy(false); }
+  };
+  const chooseChannel = async (c: Channel) => {
+    try { await tg.selectChannel(c.id); setChannel(c.id); setTracks([]); setCursor('');
+      setMore(true); setScope(null); setTab('Home'); setError(''); }
+    catch (e) { setError(String(e)); }
+  };
 
-  useEffect(() => {
-    if (ready && selected) { loadTracks('', true); }
-  }, [ready, selected, loadTracks]);
+  const row = (t: Track, context: Track[]) => <TouchableOpacity key={t.messageId}
+    style={s.row} onPress={() => play(t, context)} accessibilityRole="button">
+    <Art id={t.coverFileId} size={48} />
+    <View style={s.rowCopy}><Text style={[s.rowTitle, snapshot.messageId === t.messageId && s.accent]}
+      numberOfLines={1}>{t.title}</Text><Text style={s.rowSub} numberOfLines={1}>{artistOf(t)}</Text></View>
+    <Button icon={library.liked.includes(t.messageId) ? 'favoriteFilled' : 'favorite'}
+      label={library.liked.includes(t.messageId) ? 'Unlike' : 'Like'} onPress={() => like(t)}
+      color={library.liked.includes(t.messageId) ? '#eba068' : '#8191a0'} />
+    <Button icon="add" label="Add to playlist" onPress={() => setAddSong(t)} color="#8191a0" />
+  </TouchableOpacity>;
+  const groupRow = (name: string, group: Track[], kind: 'artist' | 'album') =>
+    <TouchableOpacity key={name} style={s.groupRow} onPress={() => openGroup(name, group)}>
+      <Art id={group[0]?.coverFileId ?? 0} size={60} round={kind === 'artist'} />
+      <View style={s.rowCopy}><Text style={s.rowTitle} numberOfLines={1}>{name}</Text>
+        <Text style={s.rowSub}>{group.length} songs</Text></View>
+      <Icon name="next" size={16} color="#8292a2" />
+    </TouchableOpacity>;
 
-  useEffect(() => {
-    if (!nowPlaying) { return; }
-    let alive = true;
-    const update = () => audio.getSnapshot().then(value => {
-      if (alive) { setPlayback(value); }
-    }).catch(e => { if (alive) { setError(String(e)); } });
-    update();
-    const timer = setInterval(update, 1000);
-    return () => { alive = false; clearInterval(timer); };
-  }, [nowPlaying]);
-
-  function playTrack(track: Track) {
-    if (!track.fileId || !track.fileSize) { setError('This audio file is unavailable.'); return; }
-    audio.playTelegram(track.fileId, track.fileSize, track.mimeType, track.title, track.artist);
-    setNowPlaying(track);
-    setPlayback({ status: 'opening', position: 0, duration: track.durationSeconds });
-    setError('');
-  }
-
-  async function submit() {
-    if (!input.trim() || busy) { return; }
-    setBusy(true);
-    setError('');
-    try {
-      if (phone) { await telegram.sendPhone(input.trim()); }
-      else if (code) { await telegram.sendCode(input.trim()); }
-      else if (password) { await telegram.sendPassword(input); }
-    } catch (e) { setError(String(e)); }
-    finally { setBusy(false); }
-  }
-
-  return <SafeAreaView style={styles.screen}>
+  if (!ready || !channel) { return <SafeAreaView style={s.screen}>
     <StatusBar barStyle="light-content" />
-    <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
-    <View style={styles.content}>
-      <View style={styles.mark}><Text style={styles.markText}>T</Text></View>
-      <Text style={styles.eyebrow}>TELOPOTIFY FOR IPHONE</Text>
-      <Text style={styles.title}>{ready ? 'Choose your channel' : 'Your music, anywhere.'}</Text>
-      <Text style={styles.description}>{ready
-        ? 'Your Telegram session lives on this iPhone. Pick the channel that holds your songs.'
-        : acceptsInput ? prompt : 'Preparing a direct connection to Telegram on this iPhone…'}</Text>
-      {acceptsInput && <>
-        <TextInput
-          autoCapitalize="none" autoCorrect={false} keyboardType={phone ? 'phone-pad' : 'default'}
-          secureTextEntry={password} placeholder={prompt} placeholderTextColor="#718092"
-          style={styles.input} value={input} onChangeText={setInput} onSubmitEditing={submit}
-        />
-        <TouchableOpacity accessibilityRole="button" disabled={busy || !input.trim()}
-          style={[styles.button, (busy || !input.trim()) && styles.disabled]} onPress={submit}>
-          <Text style={styles.buttonText}>{busy ? 'Connecting…' : 'Continue'}</Text>
-        </TouchableOpacity>
-      </>}
-      {!!error && <Text style={styles.error}>{error}</Text>}
-      {ready && <>
-        <View style={styles.channelList}>
-        {channels.map(channel => <TouchableOpacity key={channel.id} accessibilityRole="button"
-          style={styles.channel} onPress={() => chooseChannel(channel)}>
-          <View style={styles.channelAvatar}><Text style={styles.channelAvatarText}>{channel.title.slice(0, 1).toUpperCase()}</Text></View>
-          <Text style={styles.channelTitle} numberOfLines={1}>{channel.title}</Text>
-          {selected === channel.id && <Text style={styles.check}>✓</Text>}
-        </TouchableOpacity>)}
-        </View>
-        <TouchableOpacity accessibilityRole="button" onPress={refreshChannels}>
-          <Text style={styles.retry}>{loadingChannels ? 'Loading channels…' : 'Refresh channels'}</Text>
-        </TouchableOpacity>
-        {selected && <Text style={styles.note}>Channel selected. Songs are listed below; playback is the next step.</Text>}
-        {selected && <>
-          <Text style={styles.sectionTitle}>Tracks</Text>
-          <View style={styles.trackList}>
-            {tracks.map(track => <TouchableOpacity key={track.messageId} accessibilityRole="button"
-              style={styles.track} onPress={() => playTrack(track)}>
-              <Text style={styles.trackTitle} numberOfLines={1}>{track.title}</Text>
-              <Text style={styles.trackArtist} numberOfLines={1}>{track.artist || 'Unknown artist'}</Text>
-            </TouchableOpacity>)}
-          </View>
-          {hasMore && <TouchableOpacity accessibilityRole="button" disabled={loadingTracks}
-            onPress={() => loadTracks(cursor)}><Text style={styles.retry}>
-              {loadingTracks ? 'Loading tracks…' : 'Load more tracks'}</Text></TouchableOpacity>}
-        </>}
-      </>}
-      {!acceptsInput && !ready && <TouchableOpacity accessibilityRole="button" onPress={() => {
-        telegram.getState().then(setAuth).catch(e => setError(String(e)));
-      }}><Text style={styles.retry}>Check connection</Text></TouchableOpacity>}
-    </View>
+    <ScrollView contentContainerStyle={s.setup} keyboardShouldPersistTaps="handled">
+      <Image source={require('../../assets/telopotify-logo.png')} style={s.mark} />
+      <Text style={s.eyebrow}>TELOPOTIFY</Text>
+      <Text style={s.setupTitle}>{ready ? 'Choose your channel.' : 'Your music, anywhere.'}</Text>
+      <Text style={s.setupCopy}>{ready ? 'Pick the Telegram channel with your songs.' :
+        phone || code || password ? prompt : 'Connecting directly to Telegram on this iPhone.'}</Text>
+      {(phone || code || password) && <><TextInput style={s.input} value={input} onChangeText={setInput}
+        placeholder={prompt} placeholderTextColor="#738292" autoCapitalize="none" autoCorrect={false}
+        keyboardType={phone ? 'phone-pad' : 'default'} secureTextEntry={password} onSubmitEditing={submit} />
+        <TouchableOpacity style={s.primary} onPress={submit} disabled={busy || !input.trim()}>
+          <Text style={s.primaryText}>{busy ? 'Connecting…' : 'Continue'}</Text></TouchableOpacity></>}
+      {ready && channels.map(c => <TouchableOpacity key={c.id} style={s.channelRow} onPress={() => chooseChannel(c)}>
+        <View style={s.channelMark}><Text style={s.rowTitle}>{c.title.slice(0, 1).toUpperCase()}</Text></View>
+        <Text style={s.rowTitle}>{c.title}</Text></TouchableOpacity>)}
+      <TouchableOpacity style={s.textButton} onPress={ready ? refreshChannels :
+        () => tg.getState().then(setAuth).catch(e => setError(String(e)))}>
+        <Text style={s.accent}>{ready ? 'Refresh channels' : 'Check connection'}</Text></TouchableOpacity>
+      {!!error && <Text style={s.error}>{error}</Text>}
     </ScrollView>
-    {nowPlaying && <View style={styles.player}>
-      <View style={styles.playerTop}>
-        <View style={styles.playerCover}><Icon name="music" size={20} /></View>
-        <View style={styles.playerInfo}>
-          <Text style={styles.playerTitle} numberOfLines={1}>{nowPlaying.title}</Text>
-          <Text style={styles.playerArtist} numberOfLines={1}>{nowPlaying.artist || 'Unknown artist'}</Text>
-        </View>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel={playback.status === 'playing' ? 'Pause' : 'Play'}
-          style={styles.playButton} onPress={() => playback.status === 'playing' ? audio.pause() : audio.resume()}>
-          <Icon name={playback.status === 'playing' ? 'pause' : 'play'} size={22} color="#10151c" />
+  </SafeAreaView>; }
+
+  return <SafeAreaView style={s.screen}>
+    <StatusBar barStyle="light-content" />
+    <View style={s.header}><View><Text style={s.eyebrow}>YOUR CHANNEL</Text>
+      <Text style={s.headerTitle}>{tab}</Text></View>
+      <Button icon="sync" label="Switch channel" onPress={() => setChannel(null)} /></View>
+    {!!error && <Text style={s.banner}>{error}</Text>}
+
+    {tab === 'Home' && <ScrollView style={s.page} contentContainerStyle={s.content}>
+      <Text style={s.welcome}>Listen to what you love.</Text>
+      <Text style={s.muted}>{tracks.length} songs from Telegram{loading ? ' · indexing…' : ''}</Text>
+      <Text style={s.section}>Your library</Text>
+      <View style={s.quickGrid}>
+        <TouchableOpacity style={s.quickCard} onPress={() => openGroup('Liked Songs', likedTracks)}>
+          <Icon name="favoriteFilled" size={26} color="#eba068" />
+          <Text style={s.quickName}>Liked Songs</Text><Text style={s.rowSub}>{likedTracks.length} songs</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={s.quickCard} onPress={() => chooseTab('Songs')}>
+          <Icon name="music" size={26} color="#eba068" />
+          <Text style={s.quickName}>All songs</Text><Text style={s.rowSub}>{tracks.length} songs</Text>
         </TouchableOpacity>
       </View>
-      <Pressable accessibilityRole="adjustable" accessibilityLabel="Song progress"
-        style={styles.progressTrack} onLayout={event => setProgressWidth(event.nativeEvent.layout.width)}
-        onPress={event => {
-          const duration = playback.duration || nowPlaying.durationSeconds;
-          if (duration > 0) { audio.seek(duration * event.nativeEvent.locationX / progressWidth); }
-        }}>
-        <View style={[styles.progressFill, { width: `${Math.min(100, 100 * playback.position /
-          Math.max(1, playback.duration || nowPlaying.durationSeconds))}%` }]} />
-      </Pressable>
-      <View style={styles.times}>
-        <Text style={styles.time}>{formatTime(playback.position)}</Text>
-        <Text style={styles.time}>{formatTime(playback.duration || nowPlaying.durationSeconds)}</Text>
-      </View>
-      {playback.status.startsWith('error:') && <Text style={styles.error}>{playback.status}</Text>}
+      <View style={s.sectionRow}><Text style={s.section}>Recently added</Text>
+        <TouchableOpacity onPress={() => chooseTab('Songs')}><Text style={s.smallAction}>View all</Text></TouchableOpacity></View>
+      {tracks.slice(0, 8).map(t => row(t, tracks))}
+      <View style={s.sectionRow}><Text style={s.section}>Artists</Text>
+        <TouchableOpacity onPress={() => chooseTab('Artists')}><Text style={s.smallAction}>View all</Text></TouchableOpacity></View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>{artists.slice(0, 8).map(([name, group]) =>
+        <TouchableOpacity key={name} style={s.artistCard} onPress={() => openGroup(name, group)}>
+          <Art id={group[0]?.coverFileId ?? 0} size={110} round />
+          <Text style={s.artistName} numberOfLines={1}>{name}</Text></TouchableOpacity>)}</ScrollView>
+    </ScrollView>}
+
+    {tab === 'Songs' && <View style={s.page}>
+      {!!scope && <TouchableOpacity style={s.back} onPress={() => setScope(null)}>
+        <Text style={s.accent}>‹  All songs</Text></TouchableOpacity>}
+      <View style={s.listHeading}><Text style={s.section}>{scope?.name ?? 'All songs'}</Text>
+        <Text style={s.muted}>{visible.length} songs</Text></View>
+      <TextInput style={s.search} placeholder="Search songs or artists" placeholderTextColor="#738292"
+        value={search} onChangeText={setSearch} />
+      <FlatList data={visible} keyExtractor={t => t.messageId} renderItem={({item}) => row(item, visible)}
+        contentContainerStyle={s.list} initialNumToRender={18} maxToRenderPerBatch={24} windowSize={7}
+        ListEmptyComponent={<Text style={s.empty}>No songs here yet.</Text>} />
     </View>}
+    {tab === 'Artists' && <FlatList style={s.page} data={artists} keyExtractor={item => item[0]}
+      renderItem={({item}) => groupRow(item[0], item[1], 'artist')} contentContainerStyle={s.list}
+      ListHeaderComponent={<Text style={s.intro}>Browse by artist</Text>} />}
+    {tab === 'Albums' && <FlatList style={s.page} data={albums} keyExtractor={item => item[0]}
+      renderItem={({item}) => groupRow(item[0], item[1], 'album')} contentContainerStyle={s.list}
+      ListHeaderComponent={<Text style={s.intro}>Albums named in Telegram captions appear here.</Text>} />}
+    {tab === 'Playlists' && <ScrollView style={s.page} contentContainerStyle={s.content}>
+      <Text style={s.intro}>Your playlists stay on this iPhone.</Text>
+      <View style={s.createRow}><TextInput style={s.playlistInput} placeholder="New playlist name"
+        placeholderTextColor="#738292" value={playlistName} onChangeText={setPlaylistName}
+        onSubmitEditing={createPlaylist} />
+        <Button icon="add" label="Create playlist" onPress={createPlaylist} color="#eba068" /></View>
+      {groupRow('Liked Songs', likedTracks, 'album')}
+      {Object.entries(library.playlists).map(([name, ids]) => groupRow(name,
+        ids.map(id => byId.get(id)).filter((t): t is Track => !!t), 'album'))}
+    </ScrollView>}
+
+    {!!snapshot.messageId && <TouchableOpacity style={s.mini} activeOpacity={0.9} onPress={() => setNowOpen(true)}>
+      <Art id={current?.coverFileId ?? 0} size={46} />
+      <View style={s.rowCopy}><Text style={s.rowTitle} numberOfLines={1}>{snapshot.title}</Text>
+        <Text style={s.rowSub} numberOfLines={1}>{snapshot.artist || 'Unknown artist'}</Text></View>
+      {current && <Button icon={library.liked.includes(current.messageId) ? 'favoriteFilled' : 'favorite'}
+        label="Like song" color="#eba068" onPress={() => like(current)} />}
+      <Button icon={snapshot.status === 'playing' ? 'pause' : 'play'} label="Play or pause"
+        onPress={toggle} size={25} />
+      <View style={[s.miniProgress, {width: `${Math.min(100, 100 * snapshot.position /
+        Math.max(1, snapshot.duration || current?.durationSeconds || 1))}%`}]} />
+    </TouchableOpacity>}
+    <View style={s.nav}>{nav.map(item => <TouchableOpacity key={item.name} style={s.navItem}
+      accessibilityRole="tab" accessibilityState={{selected: tab === item.name}}
+      onPress={() => chooseTab(item.name)}><Icon name={item.icon} size={20}
+        color={tab === item.name ? '#eba068' : '#8393a2'} />
+      <Text style={[s.navLabel, tab === item.name && s.accent]}>{item.name}</Text>
+    </TouchableOpacity>)}</View>
+
+    <Modal visible={nowOpen} animationType="slide" onRequestClose={() => setNowOpen(false)}>
+      <SafeAreaView style={s.nowScreen}><StatusBar barStyle="light-content" />
+        <View style={s.nowHeader}><Button icon="down" label="Close Now Playing" onPress={() => setNowOpen(false)} />
+          <Text style={s.eyebrow}>NOW PLAYING</Text><View style={s.iconButton} /></View>
+        <View style={s.nowBody}><View style={s.largeArt}><Art id={current?.coverFileId ?? 0} size={270} /></View>
+          <View style={s.nowTitleRow}><View style={s.rowCopy}>
+            <Text style={s.nowTitle} numberOfLines={2}>{snapshot.title}</Text>
+            <Text style={s.nowArtist}>{snapshot.artist || 'Unknown artist'}</Text></View>
+            {current && <Button icon={library.liked.includes(current.messageId) ? 'favoriteFilled' : 'favorite'}
+              label="Like song" color="#eba068" onPress={() => like(current)} />}
+            {current && <Button icon="add" label="Add to playlist" onPress={() => setAddSong(current)} />}
+          </View>
+          <Pressable style={s.progressTouch} accessibilityRole="adjustable" accessibilityLabel="Song progress"
+            onLayout={e => setProgressWidth(e.nativeEvent.layout.width)} onPress={e => seek(e.nativeEvent.locationX)}>
+            <View style={s.progressTrack}><View style={[s.progressFill,
+              {width: `${Math.min(100, 100 * snapshot.position /
+                Math.max(1, snapshot.duration || current?.durationSeconds || 1))}%`}]}>
+              <View style={s.progressDot} />
+            </View></View>
+          </Pressable>
+          <View style={s.timeRow}><Text style={s.time}>{time(snapshot.position)}</Text>
+            <Text style={s.time}>{time(snapshot.duration || current?.durationSeconds || 0)}</Text></View>
+          <View style={s.controls}><Button icon="previous" label="Previous song" size={28} onPress={audio.previous} />
+            <TouchableOpacity style={s.bigPlay} onPress={toggle} accessibilityRole="button" accessibilityLabel="Play or pause">
+              <Icon name={snapshot.status === 'playing' ? 'pause' : 'play'} size={32} color="#10151b" />
+            </TouchableOpacity><Button icon="next" label="Next song" size={28} onPress={audio.next} /></View>
+          <Text style={s.queueNote}>{snapshot.queueIndex + 1} of {snapshot.queueCount} in queue</Text>
+          {snapshot.status.startsWith('error:') && <Text style={s.error}>{snapshot.status}</Text>}
+        </View>
+      </SafeAreaView>
+    </Modal>
+    <Modal visible={!!addSong} transparent animationType="fade" onRequestClose={() => setAddSong(null)}>
+      <Pressable style={s.shade} onPress={() => setAddSong(null)}><View style={s.sheet}>
+        <Text style={s.sheetTitle}>Add to playlist</Text>
+        {Object.keys(library.playlists).length === 0 && <Text style={s.muted}>Create a playlist first.</Text>}
+        {Object.keys(library.playlists).map(name => <TouchableOpacity key={name} style={s.sheetRow}
+          onPress={() => addSong && addTo(name, addSong)}><Icon name="playlist" color="#eba068" />
+          <Text style={s.rowTitle}>{name}</Text></TouchableOpacity>)}
+      </View></Pressable>
+    </Modal>
   </SafeAreaView>;
 }
 
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#080d14' },
-  scrollContent: { flexGrow: 1 },
-  content: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 30, paddingVertical: 32 },
-  mark: { width: 64, height: 64, borderRadius: 19, backgroundColor: '#173147',
-    alignItems: 'center', justifyContent: 'center', marginBottom: 48 },
-  markText: { color: '#f5f7f8', fontSize: 33, fontWeight: '700' },
-  eyebrow: { color: '#ed9b58', fontSize: 11, fontWeight: '700', letterSpacing: 2.2, marginBottom: 14 },
-  title: { color: '#f6f7f8', fontSize: 34, fontWeight: '700', letterSpacing: -1.2, lineHeight: 39 },
-  description: { color: '#a4afbb', fontSize: 16, lineHeight: 24, marginTop: 16, marginBottom: 30 },
-  input: { color: '#f6f7f8', backgroundColor: '#16212d', borderRadius: 12,
-    paddingHorizontal: 17, height: 54, fontSize: 16, marginBottom: 14 },
-  button: { backgroundColor: '#ed9b58', borderRadius: 12, height: 54,
-    alignItems: 'center', justifyContent: 'center' },
-  disabled: { opacity: 0.5 },
-  buttonText: { color: '#10151c', fontSize: 16, fontWeight: '700' },
-  error: { color: '#ff9b9b', fontSize: 14, marginTop: 16 },
-  retry: { color: '#ed9b58', fontSize: 15, fontWeight: '600' },
-  channel: { flexDirection: 'row', alignItems: 'center', minHeight: 62, marginBottom: 8 },
-  channelList: { marginBottom: 20 },
-  channelAvatar: { width: 42, height: 42, borderRadius: 10, backgroundColor: '#243f55',
-    alignItems: 'center', justifyContent: 'center', marginRight: 14 },
-  channelAvatarText: { color: '#eff5fa', fontSize: 18, fontWeight: '700' },
-  channelTitle: { color: '#f6f7f8', fontSize: 16, flex: 1 },
-  check: { color: '#ed9b58', fontSize: 22, marginLeft: 12 },
-  note: { color: '#a4afbb', marginTop: 28, fontSize: 14, lineHeight: 21 },
-  sectionTitle: { color: '#f6f7f8', fontSize: 21, fontWeight: '700', marginTop: 24, marginBottom: 10 },
-  trackList: { marginBottom: 16 },
-  track: { minHeight: 54, justifyContent: 'center', marginBottom: 6 },
-  trackTitle: { color: '#f6f7f8', fontSize: 15, fontWeight: '600' },
-  trackArtist: { color: '#a4afbb', fontSize: 13, marginTop: 3 },
-  player: { backgroundColor: '#16212d', paddingHorizontal: 18, paddingTop: 12, paddingBottom: 10 },
-  playerTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 13 },
-  playerCover: { width: 46, height: 46, borderRadius: 7, backgroundColor: '#244158',
-    alignItems: 'center', justifyContent: 'center', marginRight: 12 },
-  playerInfo: { flex: 1, marginRight: 12 },
-  playerTitle: { color: '#f6f7f8', fontSize: 15, fontWeight: '600' },
-  playerArtist: { color: '#a4afbb', fontSize: 12, marginTop: 3 },
-  playButton: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#ed9b58',
-    alignItems: 'center', justifyContent: 'center' },
-  progressTrack: { height: 5, borderRadius: 3, backgroundColor: '#405060' },
-  progressFill: { height: 5, borderRadius: 3, backgroundColor: '#ed9b58' },
-  times: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
-  time: { color: '#a4afbb', fontSize: 11 },
+const s = StyleSheet.create({
+  screen: {flex: 1, backgroundColor: '#090d13'}, setup: {flexGrow: 1, justifyContent: 'center', padding: 28},
+  mark: {width: 68, height: 68, borderRadius: 18, backgroundColor: '#203449', alignItems: 'center', justifyContent: 'center', marginBottom: 36},
+  eyebrow: {color: '#eba068', fontSize: 10, fontWeight: '800', letterSpacing: 2},
+  setupTitle: {color: '#f3f5f7', fontSize: 35, fontWeight: '800', letterSpacing: -1, marginTop: 10},
+  setupCopy: {color: '#a5b1bc', fontSize: 16, lineHeight: 24, marginTop: 18, marginBottom: 26},
+  input: {height: 52, borderRadius: 9, backgroundColor: '#192633', color: '#f3f5f7', paddingHorizontal: 16, marginBottom: 12},
+  primary: {height: 52, borderRadius: 26, backgroundColor: '#eba068', alignItems: 'center', justifyContent: 'center'},
+  primaryText: {color: '#10151b', fontWeight: '800', fontSize: 15},
+  channelRow: {flexDirection: 'row', alignItems: 'center', minHeight: 66, gap: 14},
+  channelMark: {width: 44, height: 44, borderRadius: 10, backgroundColor: '#203449', alignItems: 'center', justifyContent: 'center'},
+  textButton: {paddingVertical: 16}, accent: {color: '#eba068'}, error: {color: '#ff9c9c', marginTop: 14},
+  banner: {color: '#ff9c9c', backgroundColor: '#33212a', padding: 10, fontSize: 12},
+  header: {paddingHorizontal: 20, paddingTop: 12, paddingBottom: 15, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'},
+  headerTitle: {color: '#f3f5f7', fontSize: 27, fontWeight: '800', marginTop: 3},
+  iconButton: {width: 38, height: 38, alignItems: 'center', justifyContent: 'center'},
+  page: {flex: 1}, content: {paddingHorizontal: 20, paddingBottom: 26},
+  welcome: {color: '#f3f5f7', fontSize: 24, fontWeight: '800', marginTop: 22},
+  muted: {color: '#8d9ba9', fontSize: 13, marginTop: 5}, section: {color: '#f3f5f7', fontSize: 21, fontWeight: '800', marginTop: 28, marginBottom: 12},
+  sectionRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'},
+  smallAction: {color: '#a6b2be', fontSize: 12, fontWeight: '700'},
+  quickGrid: {flexDirection: 'row', gap: 12}, quickCard: {flex: 1, height: 140, backgroundColor: '#192a3a', borderRadius: 11, padding: 14, justifyContent: 'flex-end'},
+  quickName: {color: '#f3f5f7', fontSize: 16, fontWeight: '800', marginTop: 18},
+  art: {backgroundColor: '#1d3245', overflow: 'hidden', alignItems: 'center', justifyContent: 'center'},
+  row: {minHeight: 64, flexDirection: 'row', alignItems: 'center', gap: 9},
+  rowCopy: {flex: 1, minWidth: 0}, rowTitle: {color: '#f0f3f6', fontSize: 14, fontWeight: '700'},
+  rowSub: {color: '#8e9cab', fontSize: 12, marginTop: 4},
+  artistCard: {width: 126, marginRight: 14}, artistName: {color: '#e9eef3', fontSize: 13, fontWeight: '700', marginTop: 9},
+  listHeading: {paddingHorizontal: 20}, search: {height: 42, borderRadius: 8, backgroundColor: '#1a2733', color: '#f3f5f7', marginHorizontal: 20, paddingHorizontal: 14},
+  list: {paddingHorizontal: 20, paddingTop: 10, paddingBottom: 24}, back: {paddingHorizontal: 20, paddingVertical: 8},
+  intro: {color: '#9ba8b5', fontSize: 14, marginBottom: 14}, empty: {color: '#8998a7', textAlign: 'center', marginTop: 50},
+  groupRow: {minHeight: 79, flexDirection: 'row', alignItems: 'center', gap: 14},
+  createRow: {flexDirection: 'row', alignItems: 'center', marginBottom: 17},
+  playlistInput: {flex: 1, height: 44, borderRadius: 8, backgroundColor: '#1a2733', color: '#f3f5f7', paddingHorizontal: 14},
+  mini: {backgroundColor: '#1b2b3b', marginHorizontal: 8, borderRadius: 9, minHeight: 62, paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center', gap: 8, overflow: 'hidden'},
+  miniProgress: {position: 'absolute', bottom: 0, left: 0, height: 2, backgroundColor: '#eba068'},
+  nav: {height: 65, flexDirection: 'row', backgroundColor: '#090d13', paddingTop: 7},
+  navItem: {flex: 1, alignItems: 'center', justifyContent: 'center'}, navLabel: {color: '#8393a2', fontSize: 10, fontWeight: '700', marginTop: 3},
+  nowScreen: {flex: 1, backgroundColor: '#111d29'}, nowHeader: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 18},
+  nowBody: {flex: 1, justifyContent: 'center', paddingHorizontal: 28, paddingBottom: 22},
+  largeArt: {alignItems: 'center', marginBottom: 40}, nowTitleRow: {flexDirection: 'row', alignItems: 'center', marginBottom: 30},
+  nowTitle: {color: '#f3f5f7', fontSize: 23, fontWeight: '800'}, nowArtist: {color: '#a4b1be', fontSize: 15, marginTop: 5},
+  progressTouch: {height: 22, justifyContent: 'center'}, progressTrack: {height: 4, borderRadius: 2, backgroundColor: '#526271'},
+  progressFill: {height: 4, borderRadius: 2, backgroundColor: '#eba068'}, timeRow: {flexDirection: 'row', justifyContent: 'space-between'},
+  progressDot: {position: 'absolute', right: -5, top: -3, width: 10, height: 10,
+    borderRadius: 5, backgroundColor: '#f6f6f5'},
+  time: {color: '#a1adba', fontSize: 12}, controls: {flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'center', marginTop: 36},
+  bigPlay: {width: 68, height: 68, borderRadius: 34, backgroundColor: '#eba068', alignItems: 'center', justifyContent: 'center'},
+  queueNote: {color: '#8293a2', textAlign: 'center', fontSize: 12, marginTop: 25},
+  shade: {flex: 1, backgroundColor: '#000b', justifyContent: 'flex-end'},
+  sheet: {backgroundColor: '#1b2835', borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 24, paddingBottom: 42},
+  sheetTitle: {color: '#f3f5f7', fontSize: 19, fontWeight: '800', marginBottom: 18},
+  sheetRow: {flexDirection: 'row', alignItems: 'center', gap: 14, minHeight: 52},
 });
