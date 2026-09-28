@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated, FlatList, Image, Linking, NativeModules, PanResponder, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text,
-  TextInput, useWindowDimensions, View,
+  Animated, FlatList, Image, Linking, NativeModules, PanResponder, Platform, Pressable as NativePressable,
+  ScrollView, StatusBar, StyleSheet, Text, TextInput, useWindowDimensions, View, type ViewStyle,
 } from 'react-native';
 import { searchTracks, type Track } from './src/core/library';
 import { createQueue, currentTrackId, moveQueueTrack,
@@ -14,6 +14,24 @@ const c = {
   bg: '#080b10', panel: '#111720', raised: '#1c2633', line: '#28323d',
   text: '#f5f6f4', muted: '#a1aab4', accent: '#ff9b46', soft: '#ffc18b',
 };
+
+const AnimatedPressable = Animated.createAnimatedComponent(NativePressable);
+function Pressable({ style, disabled, onHoverIn, onHoverOut, onPressIn, onPressOut, ...props }:
+  React.ComponentProps<typeof NativePressable>) {
+  const motion = useRef(new Animated.Value(0)).current;
+  const hovered = useRef(false);
+  const animate = (value: number) => Animated.timing(motion, {
+    toValue: value, duration: 140, useNativeDriver: true,
+  }).start();
+  return <AnimatedPressable {...props} disabled={disabled}
+    onHoverIn={event => { hovered.current = true; if (!disabled) animate(1); onHoverIn?.(event); }}
+    onHoverOut={event => { hovered.current = false; animate(0); onHoverOut?.(event); }}
+    onPressIn={event => { if (!disabled) animate(1.5); onPressIn?.(event); }}
+    onPressOut={event => { animate(hovered.current ? 1 : 0); onPressOut?.(event); }}
+    style={[style as ViewStyle, { cursor: disabled ? 'auto' : 'pointer' } as ViewStyle,
+      { opacity: motion.interpolate({ inputRange: [0, 1, 1.5], outputRange: [1, 0.88, 0.72] }),
+        transform: [{ scale: motion.interpolate({ inputRange: [0, 1, 1.5], outputRange: [1, 1.012, 0.985] }) }] }]} />;
+}
 
 const DISCOVERY_URL = 'http://127.0.0.1:43127/bootstrap';
 const BRIDGE_BASE = 'http://127.0.0.1:43127';
@@ -78,7 +96,7 @@ async function bridgeRequest<T>(connection: Bridge, path: string, data?: object)
 }
 
 export default function App() {
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const wide = width >= 800;
   const [query, setQuery] = useState('');
   const [bridge, setBridge] = useState<Bridge | null>(null);
@@ -124,6 +142,13 @@ export default function App() {
   const endedHandled = useRef(false);
   const [page, setPage] = useState<'home' | 'library' | 'artists' | 'albums' |
     'favorites' | 'playlists' | 'queue' | 'recent' | 'nowPlaying'>('home');
+  const pageMotion = useRef(new Animated.Value(1)).current;
+  const initialPage = useRef(true);
+  useEffect(() => {
+    if (initialPage.current) { initialPage.current = false; return; }
+    pageMotion.setValue(0);
+    Animated.timing(pageMotion, { toValue: 1, duration: 190, useNativeDriver: true }).start();
+  }, [page, pageMotion]);
   const [queue, setQueue] = useState(() => createQueue([]));
   const [favorites, setFavorites] = useState<string[]>([]);
   const [recentTrackIds, setRecentTrackIds] = useState<string[]>([]);
@@ -806,7 +831,7 @@ export default function App() {
     <StatusBar barStyle="light-content" backgroundColor={c.bg} />
     <View style={s.body}>
       {wide && <View style={s.sidebar}>
-        <View style={s.brandRow}><View style={s.brandMark}><Icon name="music" size={22} color={c.bg} /></View>
+        <View style={s.brandRow}><Image source={require('./assets/telopotify-logo.png')} style={s.brandMark} />
           <View><Text style={s.brand}>telopotify</Text><Text style={s.brandTag}>TELEGRAM MUSIC</Text></View></View>
         <Text style={s.navCaption}>DISCOVER</Text>
         <Nav icon="home" label="Home" active={page === 'home'} onPress={() => setPage('home')} />
@@ -829,9 +854,13 @@ export default function App() {
           <Text style={s.connection} numberOfLines={2}>{connectionStatus}</Text>
         </View>
       </View>}
-      <View style={s.main}>
+      <Animated.View style={[s.main, { opacity: pageMotion,
+        transform: [{ translateY: pageMotion.interpolate({ inputRange: [0, 1], outputRange: [7, 0] }) }] }]}>
+      <ScrollView key={`${page}:${activeArtist}:${activeAlbum}`} style={s.pageScroll}
+        contentContainerStyle={s.pageScrollContent} nestedScrollEnabled keyboardShouldPersistTaps="handled">
         {!wide && <View style={s.compactNav}>
-          <Text style={s.compactBrand}>telopotify</Text>
+          <View style={s.compactBrandRow}><Image source={require('./assets/telopotify-logo.png')}
+            style={s.compactLogo} /><Text style={s.compactBrand}>telopotify</Text></View>
           <Nav icon="home" label="Home" active={page === 'home'} onPress={() => setPage('home')} />
           <Nav icon="library" label="Tracks" active={page === 'library'} onPress={() => setPage('library')} />
           <Nav icon="artist" label="Artists" active={page === 'artists'} onPress={() => { setActiveArtist(''); setPage('artists'); }} />
@@ -1068,7 +1097,8 @@ export default function App() {
           <><TextInput accessibilityLabel={`Search ${page}`} placeholder={`Search ${page}`}
             placeholderTextColor={c.muted} value={groupQuery} onChangeText={setGroupQuery}
             style={[s.search, s.groupSearch]} />
-          <FlatList data={(page === 'artists' ? artistGroups : albumGroups)
+          <FlatList style={[s.groupList, { height: Math.max(300, Math.min(620, height - 310)) }]}
+            nestedScrollEnabled data={(page === 'artists' ? artistGroups : albumGroups)
             .filter(([name]) => name.toLocaleLowerCase().includes(groupQuery.trim().toLocaleLowerCase()))}
             keyExtractor={item => item[0]} renderItem={({ item }) => <GroupRow
               icon={page === 'artists' ? 'artist' : 'album'} name={item[0]} count={item[1].length}
@@ -1124,7 +1154,8 @@ export default function App() {
         <View style={s.tableHead}><Text style={s.tableNumber}>#</Text><View style={s.tableCover} /><Text style={s.tableTitle}>TITLE</Text>
           {wide && <Text style={s.tableSize}>SIZE</Text>}<Text style={s.tableDuration}>TIME</Text>
           <View style={[s.tableActions, page === 'queue' && s.tableQueueActions]} /></View>
-        <FlatList data={items} keyExtractor={item => item.id}
+        <FlatList style={[s.songList, { height: Math.max(310, Math.min(680, height - 300)) }]}
+          nestedScrollEnabled data={items} keyExtractor={item => item.id}
           renderItem={({ item, index }) => <View
             style={[s.row, selected?.id === item.id && s.selected, unavailableTrackIds.has(item.id) && s.unavailableRow]}>
             <Pressable accessibilityRole="button"
@@ -1190,7 +1221,8 @@ export default function App() {
               page === 'library' && tracks.length ?
                 'Try changing the search or filters.' : connectionStatus}</Text></View>} />
         </>}
-      </View>
+      </ScrollView>
+      </Animated.View>
       {wide && width >= 1120 && page !== 'nowPlaying' && <View style={s.rightRail}>
         <View style={s.railHeading}><Text style={s.railTitle}>Now playing</Text>
           <Pressable accessibilityRole="button" accessibilityLabel="Open full now playing page"
@@ -1217,6 +1249,7 @@ export default function App() {
       </View>}
     </View>
     <View style={[s.playerBar, !wide && s.playerBarCompact]}>
+      <View style={[s.playerMainRow, !wide && s.playerMainRowCompact]}>
       <View style={s.nowPlaying}>
         <Pressable accessibilityRole="button" accessibilityLabel="Open now playing"
           onPress={() => setPage('nowPlaying')} style={s.nowPlayingLink}>
@@ -1263,7 +1296,17 @@ export default function App() {
             color={sleepUntil ? c.accent : c.muted} />
           <Text style={s.extraControlText}>{sleepUntil ? `${Math.ceil(sleepRemaining / 60)}m` : 'Off'}</Text></Pressable>
       </View>
-      <View style={s.progressRow}>
+      </View>
+      {wide && <View style={s.playerRight}>
+        <View style={s.volumeRow}><Icon name="volume" size={17} color={c.muted} />
+          <Pressable accessibilityRole="adjustable" accessibilityLabel="Volume"
+            accessibilityValue={{ min: 0, max: 100, now: Math.round(volume * 100) }}
+            onLayout={event => setVolumeWidth(event.nativeEvent.layout.width)}
+            onPress={event => changeVolume(event.nativeEvent.locationX / volumeWidth)}
+            style={s.volumeTrack}><View style={[s.volumeFill, { width: `${volume * 100}%` }]} /></Pressable>
+          <Text style={s.volumeValue}>{Math.round(volume * 100)}%</Text></View></View>}
+      </View>
+      <View style={s.playerProgressRow}>
         <Text style={s.time}>{clock(position)}</Text>
         <Pressable accessibilityRole="button" accessibilityLabel="Seek in song"
           onLayout={event => setProgressWidth(event.nativeEvent.layout.width)}
@@ -1273,17 +1316,6 @@ export default function App() {
         </Pressable>
         <Text style={s.time}>{clock(duration)}</Text>
       </View>
-      </View>
-      {wide && <View style={s.playerRight}>
-        <Text style={s.playerRightLabel}>{playbackStatus.startsWith('error:') ? 'PLAYBACK ERROR' :
-          playingTrackId === selected?.id ? playbackStatus.toUpperCase() : 'READY TO PLAY'}</Text>
-        <View style={s.volumeRow}><Icon name="volume" size={17} color={c.muted} />
-          <Pressable accessibilityRole="adjustable" accessibilityLabel="Volume"
-            accessibilityValue={{ min: 0, max: 100, now: Math.round(volume * 100) }}
-            onLayout={event => setVolumeWidth(event.nativeEvent.layout.width)}
-            onPress={event => changeVolume(event.nativeEvent.locationX / volumeWidth)}
-            style={s.volumeTrack}><View style={[s.volumeFill, { width: `${volume * 100}%` }]} /></Pressable>
-          <Text style={s.volumeValue}>{Math.round(volume * 100)}%</Text></View></View>}
     </View>
   </View></ArtworkContext.Provider>;
 }
@@ -1417,7 +1449,7 @@ const s = StyleSheet.create({
   body: { flex: 1, flexDirection: 'row' },
   sidebar: { width: 218, padding: 18, backgroundColor: '#0c1118', borderRightWidth: 1, borderColor: c.line },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 38 },
-  brandMark: { width: 37, height: 37, borderRadius: 10, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center' },
+  brandMark: { width: 43, height: 43, borderRadius: 22 },
   brand: { color: c.text, fontSize: 21, fontWeight: '800', letterSpacing: -0.7 },
   brandTag: { color: c.muted, fontSize: 8, fontWeight: '800', letterSpacing: 1.3, marginTop: 1 },
   navCaption: { color: '#708098', fontSize: 10, fontWeight: '800', letterSpacing: 1.6, marginBottom: 12, paddingHorizontal: 12 },
@@ -1453,8 +1485,14 @@ const s = StyleSheet.create({
   navText: { color: c.muted, fontSize: 14, fontWeight: '600' },
   navTextActive: { color: c.text },
   compactNav: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginBottom: 17, gap: 4 },
-  compactBrand: { color: c.text, fontSize: 17, fontWeight: '800', width: '100%', marginBottom: 8 },
-  main: { flex: 1, paddingHorizontal: 26, paddingTop: 24, paddingBottom: 10 },
+  compactBrandRow: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 9, marginBottom: 8 },
+  compactLogo: { width: 27, height: 27, borderRadius: 14 },
+  compactBrand: { color: c.text, fontSize: 17, fontWeight: '800' },
+  main: { flex: 1, minHeight: 0, paddingHorizontal: 26, paddingTop: 24 },
+  pageScroll: { flex: 1 },
+  pageScrollContent: { paddingBottom: 30 },
+  songList: { flexGrow: 0, marginBottom: 10 },
+  groupList: { flexGrow: 0, marginBottom: 10 },
   topLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   breadcrumb: { color: c.accent, fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
   topStatus: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: c.panel,
@@ -1621,7 +1659,7 @@ const s = StyleSheet.create({
   rowMain: { flex: 1, flexDirection: 'row', alignItems: 'center', minWidth: 0 },
   rowActions: { minWidth: 108, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end' },
   dragHandle: { width: 30, height: 32, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
-  rowAction: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 7 },
+  rowAction: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
   rowActionDisabled: { opacity: 0.35 },
   selected: { backgroundColor: '#24313a' },
   unavailableRow: { opacity: 0.45 },
@@ -1640,27 +1678,31 @@ const s = StyleSheet.create({
   emptyCard: { alignItems: 'center', padding: 36, marginTop: 18, borderWidth: 1, borderColor: c.line, borderRadius: 14, backgroundColor: c.panel },
   emptyTitle: { color: c.text, fontSize: 15, fontWeight: '700' },
   empty: { color: c.muted, fontSize: 12, marginTop: 5, textAlign: 'center' },
-  playerBar: { height: 100, paddingHorizontal: 22, backgroundColor: c.panel, borderTopWidth: 1,
-    borderColor: c.line, flexDirection: 'row', alignItems: 'center' },
-  playerBarCompact: { height: 145, flexDirection: 'column', alignItems: 'stretch', paddingVertical: 10 },
-  nowPlaying: { flex: 1, flexDirection: 'row', alignItems: 'center', minWidth: 0 },
+  playerBar: { height: 92, paddingHorizontal: 22, paddingTop: 6, paddingBottom: 4,
+    backgroundColor: c.panel, borderTopWidth: 1, borderColor: c.line },
+  playerBarCompact: { height: 145, paddingTop: 8 },
+  playerMainRow: { flex: 1, flexDirection: 'row', alignItems: 'center', minHeight: 0 },
+  playerMainRowCompact: { flexDirection: 'column', alignItems: 'stretch' },
+  nowPlaying: { flex: 1.25, flexDirection: 'row', alignItems: 'center', minWidth: 0 },
   nowPlayingLink: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center' },
-  stickyActions: { flexDirection: 'row', marginLeft: 4 },
+  stickyActions: { flexDirection: 'row', alignItems: 'center', gap: 2, marginLeft: 7 },
   playerTitle: { color: c.text, fontSize: 13, fontWeight: '700' },
-  playerCenter: { flex: 1.2 },
-  transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 48 },
+  playerCenter: { flex: 1, minWidth: 0, alignItems: 'center' },
+  transport: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 46, gap: 3 },
+  playerProgressRow: { flexDirection: 'row', alignItems: 'center', gap: 9, height: 19 },
   progressRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 1 },
-  progressTrack: { flex: 1, height: 5, backgroundColor: c.raised, borderRadius: 3 },
-  progressFill: { height: 5, backgroundColor: c.accent, borderRadius: 3 },
-  time: { color: c.muted, fontSize: 10, width: 30 },
-  transportButton: { paddingHorizontal: 17, paddingVertical: 9 },
-  extraControl: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 8, paddingVertical: 9 },
-  extraControlText: { color: c.muted, fontSize: 11, fontWeight: '700' },
-  repeatButton: { position: 'absolute', left: 0, paddingHorizontal: 10, paddingVertical: 8 },
-  disabledPlay: { width: 46, height: 46, borderRadius: 23, backgroundColor: c.raised,
+  progressTrack: { flex: 1, height: 6, backgroundColor: c.raised, borderRadius: 3 },
+  progressFill: { height: 6, backgroundColor: c.accent, borderRadius: 3 },
+  time: { color: c.muted, fontSize: 10, width: 35, textAlign: 'center' },
+  transportButton: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
+  extraControl: { width: 50, height: 34, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 2, borderRadius: 8 },
+  extraControlText: { color: c.muted, fontSize: 10, fontWeight: '700' },
+  repeatButton: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 8 },
+  disabledPlay: { width: 40, height: 40, borderRadius: 20, backgroundColor: c.raised,
     alignItems: 'center', justifyContent: 'center' },
   enabledPlay: { backgroundColor: c.accent },
-  playerRight: { flex: 1, alignItems: 'flex-end' },
+  playerRight: { width: 165, alignItems: 'flex-end', justifyContent: 'center' },
   rightRail: { width: 250, padding: 17, backgroundColor: '#10151c', borderLeftWidth: 1, borderColor: c.line },
   railHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 },
   railTitle: { color: c.text, fontSize: 15, fontWeight: '800' },
@@ -1670,8 +1712,7 @@ const s = StyleSheet.create({
   railDivider: { height: 1, backgroundColor: c.line, marginVertical: 20 },
   railQueue: { flex: 1 },
   railQueueRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 5, gap: 2 },
-  playerRightLabel: { color: c.text, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
-  volumeRow: { width: 150, flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 10 },
+  volumeRow: { width: 155, flexDirection: 'row', alignItems: 'center', gap: 7 },
   volumeTrack: { flex: 1, height: 5, backgroundColor: c.raised, borderRadius: 3 },
   volumeFill: { height: 5, backgroundColor: c.accent, borderRadius: 3 },
   volumeValue: { color: c.muted, fontSize: 10, width: 29, textAlign: 'right' },
