@@ -307,10 +307,10 @@ export default function IOSApp() {
           </Pressable>
           <View style={s.timeRow}><Text style={s.time}>{time(snapshot.position)}</Text>
             <Text style={s.time}>{time(snapshot.duration || current?.durationSeconds || 0)}</Text></View>
-          <View style={s.controls}><Button icon="previous" label="Previous song" size={28} onPress={audio.previous} />
+          <View style={s.controls}><Button icon="previous" label="Previous song" size={28} onPress={() => audio.previous()} />
             <TouchableOpacity style={s.bigPlay} onPress={toggle} accessibilityRole="button" accessibilityLabel="Play or pause">
               <Icon name={snapshot.status === 'playing' ? 'pause' : 'play'} size={32} color="#10151b" />
-            </TouchableOpacity><Button icon="next" label="Next song" size={28} onPress={audio.next} /></View>
+            </TouchableOpacity><Button icon="next" label="Next song" size={28} onPress={() => audio.next()} /></View>
           <Text style={s.queueNote}>{snapshot.queueIndex + 1} of {snapshot.queueCount} in queue</Text>
           {snapshot.status.startsWith('error:') && <Text style={s.error}>{snapshot.status}</Text>}
         </View>
