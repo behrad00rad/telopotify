@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  NativeEventEmitter, NativeModules, SafeAreaView, ScrollView, StatusBar, StyleSheet,
-  Text, TextInput, TouchableOpacity, View,
+  NativeEventEmitter, NativeModules, Pressable, SafeAreaView, ScrollView, StatusBar,
+  StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
+import { Icon } from '../components/Icon';
 
 type AuthState = { state: string; error?: string };
 type Channel = { id: string; title: string };
-type Track = { messageId: string; title: string; artist: string; durationSeconds: number };
+type Track = { messageId: string; fileId: number; fileSize: number; mimeType: string;
+  title: string; artist: string; durationSeconds: number };
 type TrackPage = { tracks: Track[]; nextCursor: string; hasMore: boolean };
+type PlaybackSnapshot = { status: string; position: number; duration: number };
 type TelegramModule = {
   start(): Promise<AuthState>;
   getState(): Promise<AuthState>;
@@ -21,6 +24,12 @@ type TelegramModule = {
 };
 
 const telegram = NativeModules.TelopotifyTelegram as TelegramModule;
+const audio = NativeModules.TelopotifyAudio as {
+  playTelegram(fileId: number, fileSize: number, mimeType: string, title: string, artist: string): void;
+  pause(): void; resume(): void; seek(seconds: number): void;
+  getSnapshot(): Promise<PlaybackSnapshot>;
+};
+const formatTime = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
 
 export default function IOSApp() {
   const [auth, setAuth] = useState<AuthState>({ state: 'starting' });
@@ -35,6 +44,9 @@ export default function IOSApp() {
   const [hasMore, setHasMore] = useState(true);
   const [loadingTracks, setLoadingTracks] = useState(false);
   const loadingTracksRef = useRef(false);
+  const [nowPlaying, setNowPlaying] = useState<Track | null>(null);
+  const [playback, setPlayback] = useState<PlaybackSnapshot>({ status: 'stopped', position: 0, duration: 0 });
+  const [progressWidth, setProgressWidth] = useState(1);
 
   useEffect(() => {
     const events = new NativeEventEmitter(NativeModules.TelopotifyTelegram);
@@ -100,6 +112,25 @@ export default function IOSApp() {
     if (ready && selected) { loadTracks('', true); }
   }, [ready, selected, loadTracks]);
 
+  useEffect(() => {
+    if (!nowPlaying) { return; }
+    let alive = true;
+    const update = () => audio.getSnapshot().then(value => {
+      if (alive) { setPlayback(value); }
+    }).catch(e => { if (alive) { setError(String(e)); } });
+    update();
+    const timer = setInterval(update, 1000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [nowPlaying]);
+
+  function playTrack(track: Track) {
+    if (!track.fileId || !track.fileSize) { setError('This audio file is unavailable.'); return; }
+    audio.playTelegram(track.fileId, track.fileSize, track.mimeType, track.title, track.artist);
+    setNowPlaying(track);
+    setPlayback({ status: 'opening', position: 0, duration: track.durationSeconds });
+    setError('');
+  }
+
   async function submit() {
     if (!input.trim() || busy) { return; }
     setBusy(true);
@@ -150,10 +181,11 @@ export default function IOSApp() {
         {selected && <>
           <Text style={styles.sectionTitle}>Tracks</Text>
           <View style={styles.trackList}>
-            {tracks.map(track => <View key={track.messageId} style={styles.track}>
+            {tracks.map(track => <TouchableOpacity key={track.messageId} accessibilityRole="button"
+              style={styles.track} onPress={() => playTrack(track)}>
               <Text style={styles.trackTitle} numberOfLines={1}>{track.title}</Text>
               <Text style={styles.trackArtist} numberOfLines={1}>{track.artist || 'Unknown artist'}</Text>
-            </View>)}
+            </TouchableOpacity>)}
           </View>
           {hasMore && <TouchableOpacity accessibilityRole="button" disabled={loadingTracks}
             onPress={() => loadTracks(cursor)}><Text style={styles.retry}>
@@ -165,6 +197,33 @@ export default function IOSApp() {
       }}><Text style={styles.retry}>Check connection</Text></TouchableOpacity>}
     </View>
     </ScrollView>
+    {nowPlaying && <View style={styles.player}>
+      <View style={styles.playerTop}>
+        <View style={styles.playerCover}><Icon name="music" size={20} /></View>
+        <View style={styles.playerInfo}>
+          <Text style={styles.playerTitle} numberOfLines={1}>{nowPlaying.title}</Text>
+          <Text style={styles.playerArtist} numberOfLines={1}>{nowPlaying.artist || 'Unknown artist'}</Text>
+        </View>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel={playback.status === 'playing' ? 'Pause' : 'Play'}
+          style={styles.playButton} onPress={() => playback.status === 'playing' ? audio.pause() : audio.resume()}>
+          <Icon name={playback.status === 'playing' ? 'pause' : 'play'} size={22} color="#10151c" />
+        </TouchableOpacity>
+      </View>
+      <Pressable accessibilityRole="adjustable" accessibilityLabel="Song progress"
+        style={styles.progressTrack} onLayout={event => setProgressWidth(event.nativeEvent.layout.width)}
+        onPress={event => {
+          const duration = playback.duration || nowPlaying.durationSeconds;
+          if (duration > 0) { audio.seek(duration * event.nativeEvent.locationX / progressWidth); }
+        }}>
+        <View style={[styles.progressFill, { width: `${Math.min(100, 100 * playback.position /
+          Math.max(1, playback.duration || nowPlaying.durationSeconds))}%` }]} />
+      </Pressable>
+      <View style={styles.times}>
+        <Text style={styles.time}>{formatTime(playback.position)}</Text>
+        <Text style={styles.time}>{formatTime(playback.duration || nowPlaying.durationSeconds)}</Text>
+      </View>
+      {playback.status.startsWith('error:') && <Text style={styles.error}>{playback.status}</Text>}
+    </View>}
   </SafeAreaView>;
 }
 
@@ -199,4 +258,17 @@ const styles = StyleSheet.create({
   track: { minHeight: 54, justifyContent: 'center', marginBottom: 6 },
   trackTitle: { color: '#f6f7f8', fontSize: 15, fontWeight: '600' },
   trackArtist: { color: '#a4afbb', fontSize: 13, marginTop: 3 },
+  player: { backgroundColor: '#16212d', paddingHorizontal: 18, paddingTop: 12, paddingBottom: 10 },
+  playerTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 13 },
+  playerCover: { width: 46, height: 46, borderRadius: 7, backgroundColor: '#244158',
+    alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  playerInfo: { flex: 1, marginRight: 12 },
+  playerTitle: { color: '#f6f7f8', fontSize: 15, fontWeight: '600' },
+  playerArtist: { color: '#a4afbb', fontSize: 12, marginTop: 3 },
+  playButton: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#ed9b58',
+    alignItems: 'center', justifyContent: 'center' },
+  progressTrack: { height: 5, borderRadius: 3, backgroundColor: '#405060' },
+  progressFill: { height: 5, borderRadius: 3, backgroundColor: '#ed9b58' },
+  times: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
+  time: { color: '#a4afbb', fontSize: 11 },
 });

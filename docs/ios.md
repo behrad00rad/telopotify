@@ -24,11 +24,14 @@ catalog, media cache, and playback queue.
    session storage.
 
 The iOS background audio capability, native AVPlayer module, and a phone-side
-TDLib sign-in module are in the repository. The iPhone app now opens its own
+TDLib sign-in module are in the repository. The iPhone app opens its own
 Telegram session in private app storage, independently of Windows, lists
 channels for selection, and pages through audio message metadata without
-downloading the files. It does not yet play songs: a TDLib-backed media resource
-loader and iOS library/player screens are the next milestones.
+downloading the files. The player requests bounded song byte ranges from TDLib
+as needed, including after a seek. This streaming path compiles in the hosted
+iOS build, but still needs device testing for playback, network recovery, and
+background behavior. Native queue advancement and a full mobile library UI
+are later milestones.
 Telegram's public sample API credentials are only for development. A dedicated
 API ID/hash are required before distribution.
 
@@ -44,5 +47,12 @@ API ID/hash are required before distribution.
 - Confirm the on-device cache stays within its configured size.
 
 GitHub Actions compiles an unsigned iOS Simulator build on a hosted Mac.
-Signing, installing on an iPhone, and device acceptance checks still require
-Mac/Xcode access and an Apple developer signing setup.
+It also packages an unsigned iPhone IPA artifact. On Windows, AltStore Classic
+can sign and sideload this IPA with a free Apple Account; the app must be
+refreshed periodically (normally every seven days). Download the artifact
+from the latest successful **iOS build** workflow run, extract its ZIP, and
+open the IPA in AltStore on the iPhone. This path still requires a real iPhone
+and Windows AltServer setup. Alternatively, Xcode on a Mac can install a
+development build, and a paid Apple Developer Program account can distribute
+signed builds through TestFlight. The simulator build alone cannot be installed
+on a phone.

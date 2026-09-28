@@ -15,6 +15,7 @@
 		A90200000000000000000001 /* TelopotifyTelegram.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90200000000000000000003 /* TelopotifyTelegram.swift */; };
 		A90200000000000000000002 /* TelopotifyTelegramBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = A90200000000000000000004 /* TelopotifyTelegramBridge.m */; };
 		A90200000000000000000005 /* TDLibKit in Frameworks */ = {isa = PBXBuildFile; productRef = A90200000000000000000007 /* TDLibKit */; };
+		A90300000000000000000001 /* TelegramStreamLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90300000000000000000002 /* TelegramStreamLoader.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 /* End PBXBuildFile section */
 
@@ -31,6 +32,7 @@
 		A90100000000000000000004 /* TelopotifyAudioBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = TelopotifyAudioBridge.m; path = TelopotifyApp/TelopotifyAudioBridge.m; sourceTree = "<group>"; };
 		A90200000000000000000003 /* TelopotifyTelegram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TelopotifyTelegram.swift; path = TelopotifyApp/TelopotifyTelegram.swift; sourceTree = "<group>"; };
 		A90200000000000000000004 /* TelopotifyTelegramBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = TelopotifyTelegramBridge.m; path = TelopotifyApp/TelopotifyTelegramBridge.m; sourceTree = "<group>"; };
+		A90300000000000000000002 /* TelegramStreamLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TelegramStreamLoader.swift; path = TelopotifyApp/TelegramStreamLoader.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = TelopotifyApp/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -57,6 +59,7 @@
 				A90100000000000000000004 /* TelopotifyAudioBridge.m */,
 				A90200000000000000000003 /* TelopotifyTelegram.swift */,
 				A90200000000000000000004 /* TelopotifyTelegramBridge.m */,
+				A90300000000000000000002 /* TelegramStreamLoader.swift */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
@@ -269,6 +272,7 @@
 				A90100000000000000000002 /* TelopotifyAudioBridge.m in Sources */,
 				A90200000000000000000001 /* TelopotifyTelegram.swift in Sources */,
 				A90200000000000000000002 /* TelopotifyTelegramBridge.m in Sources */,
+				A90300000000000000000001 /* TelegramStreamLoader.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -3,6 +3,7 @@
 @interface RCT_EXTERN_MODULE(TelopotifyAudio, NSObject)
 
 RCT_EXTERN_METHOD(play:(NSString *)url title:(NSString *)title artist:(NSString *)artist)
+RCT_EXTERN_METHOD(playTelegram:(nonnull NSNumber *)fileId fileSize:(nonnull NSNumber *)fileSize mimeType:(NSString *)mimeType title:(NSString *)title artist:(NSString *)artist)
 RCT_EXTERN_METHOD(pause)
 RCT_EXTERN_METHOD(resume)
 RCT_EXTERN_METHOD(stop)

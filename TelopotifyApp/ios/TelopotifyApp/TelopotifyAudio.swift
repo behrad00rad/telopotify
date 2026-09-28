@@ -3,8 +3,7 @@ import MediaPlayer
 import React
 
 // The player lives in iOS rather than JavaScript so locking the phone does not
-// suspend the current song. A Telegram-backed AVAsset will be supplied here by
-// the direct iOS library client once its TDLib adapter is installed.
+// suspend the current song.
 @objc(TelopotifyAudio)
 final class TelopotifyAudio: NSObject {
   private let player = AVPlayer()
@@ -16,6 +15,7 @@ final class TelopotifyAudio: NSObject {
   private var endObserver: NSObjectProtocol?
   private var interruptionObserver: NSObjectProtocol?
   private var shouldResumeAfterInterruption = false
+  private var streamLoader: TelegramStreamLoader?
 
   @objc static func requiresMainQueueSetup() -> Bool { true }
 
@@ -66,11 +66,53 @@ final class TelopotifyAudio: NSObject {
         return
       }
       if let endObserver = self.endObserver { NotificationCenter.default.removeObserver(endObserver) }
+      self.streamLoader = nil
       self.title = title
       self.artist = artist
       self.ended = false
       self.errorMessage = nil
       let item = AVPlayerItem(url: url)
+      self.endObserver = NotificationCenter.default.addObserver(
+        forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+      ) { [weak self] _ in
+        self?.ended = true
+        self?.updateNowPlaying()
+      }
+      self.player.replaceCurrentItem(with: item)
+      self.resumeOnMain()
+    }
+  }
+
+  @objc(playTelegram:fileSize:mimeType:title:artist:)
+  func playTelegram(_ fileId: NSNumber, fileSize: NSNumber, mimeType: String,
+                    title: String, artist: String) {
+    DispatchQueue.main.async {
+      guard fileId.intValue > 0, fileSize.int64Value > 0,
+            TelopotifyTelegram.active != nil else {
+        self.errorMessage = "Telegram audio is unavailable"
+        return
+      }
+      do { try AVAudioSession.sharedInstance().setActive(true) }
+      catch {
+        self.errorMessage = "Audio session is unavailable: \(error.localizedDescription)"
+        return
+      }
+      let ext = mimeType.contains("mp4") || mimeType.contains("m4a") ? "m4a" : "mp3"
+      guard let url = URL(string: "telopotify-stream://audio/\(fileId.intValue).\(ext)") else {
+        self.errorMessage = "Invalid audio source"
+        return
+      }
+      let loader = TelegramStreamLoader(fileId: fileId.intValue,
+                                        fileSize: fileSize.int64Value, mimeType: mimeType)
+      let asset = AVURLAsset(url: url)
+      asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+      let item = AVPlayerItem(asset: asset)
+      if let endObserver = self.endObserver { NotificationCenter.default.removeObserver(endObserver) }
+      self.streamLoader = loader
+      self.title = title
+      self.artist = artist
+      self.ended = false
+      self.errorMessage = nil
       self.endObserver = NotificationCenter.default.addObserver(
         forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
       ) { [weak self] _ in
@@ -88,6 +130,7 @@ final class TelopotifyAudio: NSObject {
     DispatchQueue.main.async {
       self.player.pause()
       self.player.replaceCurrentItem(with: nil)
+      self.streamLoader = nil
       self.ended = false
       self.errorMessage = nil
       MPNowPlayingInfoCenter.default().nowPlayingInfo = nil

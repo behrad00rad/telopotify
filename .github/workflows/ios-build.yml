@@ -46,3 +46,26 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/telopotify-ios" \
             CODE_SIGNING_ALLOWED=NO \
             build
+      - name: Build unsigned iPhone app
+        run: |
+          xcodebuild \
+            -workspace TelopotifyApp/ios/TelopotifyApp.xcworkspace \
+            -scheme TelopotifyApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/telopotify-iphone" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+      - name: Package IPA for local signing
+        run: |
+          mkdir -p "$RUNNER_TEMP/telopotify-ipa/Payload"
+          ditto "$RUNNER_TEMP/telopotify-iphone/Build/Products/Release-iphoneos/TelopotifyApp.app" \
+            "$RUNNER_TEMP/telopotify-ipa/Payload/TelopotifyApp.app"
+          cd "$RUNNER_TEMP/telopotify-ipa"
+          zip -qry "$RUNNER_TEMP/Telopotify-unsigned.ipa" Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Telopotify-unsigned-iPhone-IPA
+          path: ${{ runner.temp }}/Telopotify-unsigned.ipa
+          if-no-files-found: error

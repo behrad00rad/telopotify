@@ -14,10 +14,16 @@ private struct TelegramQuery: TdQuery {
 
 @objc(TelopotifyTelegram)
 final class TelopotifyTelegram: RCTEventEmitter {
+  static weak var active: TelopotifyTelegram?
   private let manager = TDLibClientManager()
   private var client: TDLibClient?
   private var state = "starting"
   private var listeners = false
+
+  override init() {
+    super.init()
+    Self.active = self
+  }
 
   @objc override static func requiresMainQueueSetup() -> Bool { false }
   override func supportedEvents() -> [String]! { ["telegramState"] }
@@ -223,6 +229,44 @@ final class TelopotifyTelegram: RCTEventEmitter {
         "nextCursor": messages.last.flatMap { ($0["id"] as? NSNumber)?.stringValue } ?? "",
         "hasMore": !messages.isEmpty,
       ])
+    }
+  }
+
+  // AVAssetResourceLoader asks for one bounded range at a time. TDLib keeps
+  // its own sparse file on disk; no audio bytes cross the React Native bridge.
+  func downloadRange(fileId: Int, offset: Int64, length: Int,
+                     completion: @escaping (Result<Data, Error>) -> Void) {
+    request([
+      "@type": "downloadFile", "file_id": fileId, "priority": 32,
+      "offset": offset, "limit": length, "synchronous": true,
+    ]) { result in
+      if result["@type"] as? String == "error" {
+        completion(.failure(NSError(domain: "TelopotifyTelegram", code: 1,
+          userInfo: [NSLocalizedDescriptionKey: result["message"] as? String ?? "Download failed"])))
+        return
+      }
+      guard let local = result["local"] as? [String: Any],
+            let path = local["path"] as? String, !path.isEmpty,
+            let downloadOffset = local["download_offset"] as? NSNumber,
+            let prefix = local["downloaded_prefix_size"] as? NSNumber,
+            (local["is_downloading_completed"] as? Bool == true ||
+              (downloadOffset.int64Value <= offset &&
+               downloadOffset.int64Value + prefix.int64Value >= offset + Int64(length))) else {
+        completion(.failure(NSError(domain: "TelopotifyTelegram", code: 2,
+          userInfo: [NSLocalizedDescriptionKey: "Requested audio range is unavailable"])))
+        return
+      }
+      do {
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(offset))
+        let bytes = try handle.read(upToCount: length) ?? Data()
+        guard bytes.count == length else {
+          throw NSError(domain: "TelopotifyTelegram", code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: "Incomplete audio range"])
+        }
+        completion(.success(bytes))
+      } catch { completion(.failure(error)) }
     }
   }
 
