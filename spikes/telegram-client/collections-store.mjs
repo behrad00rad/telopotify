@@ -1,7 +1,7 @@
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 
 export function emptyCollections() {
-  return { favorites: [], playlists: [], recentTrackIds: [], albumOverrides: {},
+  return { favorites: [], playlists: [], recentTrackIds: [], albumOverrides: {}, coverOverrides: {},
     queue: { trackIds: [], currentTrackId: null, repeat: 'off' } };
 }
 
@@ -50,7 +50,18 @@ export function normalizeCollections(value) {
     }
     albumOverrides[id] = album.trim();
   }
-  return { favorites, playlists, recentTrackIds, albumOverrides,
+  const rawCovers = value.coverOverrides ?? {};
+  if (!rawCovers || typeof rawCovers !== 'object' || Array.isArray(rawCovers) ||
+      Object.keys(rawCovers).length > 2000) throw new Error('Invalid collections');
+  const coverOverrides = {};
+  for (const [id, url] of Object.entries(rawCovers)) {
+    ids([id]);
+    if (typeof url !== 'string' || url.length > 1000 || !/^https:\/\/[^\s]+$/i.test(url)) {
+      throw new Error('Invalid cover URL');
+    }
+    coverOverrides[id] = url;
+  }
+  return { favorites, playlists, recentTrackIds, albumOverrides, coverOverrides,
     queue: { trackIds, currentTrackId, repeat: queue.repeat } };
 }
 

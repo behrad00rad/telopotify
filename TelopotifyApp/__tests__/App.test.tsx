@@ -4,7 +4,7 @@
 
 import React from 'react';
 import ReactTestRenderer from 'react-test-renderer';
-import { Linking, NativeModules, Platform } from 'react-native';
+import { Image, Linking, NativeModules, Platform } from 'react-native';
 import App from '../App';
 import { Icon } from '../src/components/Icon';
 
@@ -126,6 +126,18 @@ test('connects automatically to the local bridge and loads a selected channel', 
     });
     expect(renderer.root.findByProps({ accessibilityLabel: 'Toggle playback from now playing' })).toBeTruthy();
     await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Edit current song cover' }).props.onPress();
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Custom cover URL' }).props
+        .onChangeText('https://example.com/song-cover.jpg');
+    });
+    await ReactTestRenderer.act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Save custom cover' }).props.onPress();
+    });
+    expect(renderer.root.findAllByType(Image).some(node =>
+      node.props.source?.uri === 'https://example.com/song-cover.jpg')).toBe(true);
+    await ReactTestRenderer.act(async () => {
       renderer.root.findByProps({ accessibilityLabel: 'Playback speed 1x' }).props.onPress();
       renderer.root.findByProps({ accessibilityLabel: 'Sleep timer off' }).props.onPress();
     });
@@ -199,6 +211,8 @@ test('connects automatically to the local bridge and loads a selected channel', 
     ]));
     expect((savedCollections as typeof savedCollections & { albumOverrides: Record<string, string> })
       .albumOverrides['7']).toBe('Night Drive');
+    expect((savedCollections as typeof savedCollections & { coverOverrides: Record<string, string> })
+      .coverOverrides['7']).toBe('https://example.com/song-cover.jpg');
     const playCalls = (NativeModules.TelopotifyAudio.play as jest.Mock).mock.calls.length;
     await ReactTestRenderer.act(async () => { renderer.unmount(); });
     await ReactTestRenderer.act(async () => { renderer = ReactTestRenderer.create(<App />); });

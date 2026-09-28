@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated, FlatList, Linking, NativeModules, PanResponder, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text,
+  Animated, FlatList, Image, Linking, NativeModules, PanResponder, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text,
   TextInput, useWindowDimensions, View,
 } from 'react-native';
 import { searchTracks, type Track } from './src/core/library';
@@ -25,11 +25,26 @@ function clock(seconds: number) {
 
 function size(bytes: number) { return `${(bytes / 1_000_000).toFixed(1)} MB`; }
 const coverColors = ['#173b58', '#24485d', '#514333', '#234b54', '#36495b'];
+type ArtworkContextValue = { bridge: Bridge | null; overrides: Record<string, string>;
+  albums: Record<string, string> };
+const ArtworkContext = React.createContext<ArtworkContextValue>({ bridge: null, overrides: {}, albums: {} });
+
+function ArtworkImage({ track }: { track?: Track }) {
+  const { bridge, overrides, albums } = React.useContext(ArtworkContext);
+  const uri = track ? overrides[track.id] || (bridge ?
+    `${bridge.base}/artwork/${track.messageId}?token=${encodeURIComponent(bridge.token)}&album=${encodeURIComponent(albums[track.id] ?? '')}` : '') : '';
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [uri, bridge?.online]);
+  return uri && !failed ? <Image source={{ uri }} resizeMode="cover" style={s.coverImage}
+    onError={() => setFailed(true)} /> : null;
+}
+
 function Cover({ track, large = false }: { track?: Track; large?: boolean }) {
   const index = track ? Number(track.messageId) % coverColors.length : 0;
   return <View style={[s.cover, large && s.coverLarge, { backgroundColor: coverColors[index] }]}>
     {track?.title ? <Text style={[s.coverGlyph, large && s.coverGlyphLarge]}>{track.title.slice(0, 1).toUpperCase()}</Text> :
       <Icon name="music" size={large ? 24 : 20} />}
+    <ArtworkImage track={track} />
   </View>;
 }
 
@@ -48,7 +63,7 @@ type LibraryResponse = { channel: string; channelId: string | null; online: bool
   fileSize: number; mimeType: string }> };
 type Playlist = { id: string; name: string; trackIds: string[] };
 type CollectionsResponse = { channelId: string; favorites: string[]; playlists: Playlist[]; recentTrackIds?: string[];
-  albumOverrides?: Record<string, string>;
+  albumOverrides?: Record<string, string>; coverOverrides?: Record<string, string>;
   queue: { trackIds: string[]; currentTrackId: string | null; repeat: QueueState['repeat'] } };
 
 async function bridgeRequest<T>(connection: Bridge, path: string, data?: object): Promise<T> {
@@ -113,6 +128,10 @@ export default function App() {
   const [favorites, setFavorites] = useState<string[]>([]);
   const [recentTrackIds, setRecentTrackIds] = useState<string[]>([]);
   const [albumOverrides, setAlbumOverrides] = useState<Record<string, string>>({});
+  const [coverOverrides, setCoverOverrides] = useState<Record<string, string>>({});
+  const [coverEditOpen, setCoverEditOpen] = useState(false);
+  const [coverEditUrl, setCoverEditUrl] = useState('');
+  const [coverError, setCoverError] = useState('');
   const [activeArtist, setActiveArtist] = useState('');
   const [activeAlbum, setActiveAlbum] = useState('');
   const [groupQuery, setGroupQuery] = useState('');
@@ -295,6 +314,7 @@ export default function App() {
       setFavorites([]);
       setRecentTrackIds([]);
       setAlbumOverrides({});
+      setCoverOverrides({});
       setArtistFilter('');
       setDurationFilter('any');
       setTypeFilter('All types');
@@ -328,6 +348,7 @@ export default function App() {
         setFavorites(saved.favorites);
         setRecentTrackIds((saved.recentTrackIds ?? []).filter(id => library.some(track => track.id === id)));
         setAlbumOverrides(saved.albumOverrides ?? {});
+        setCoverOverrides(saved.coverOverrides ?? {});
         setPlaylists(saved.playlists);
         setActivePlaylistId(saved.playlists[0]?.id ?? '');
         setRenamePlaylistName(saved.playlists[0]?.name ?? '');
@@ -343,7 +364,7 @@ export default function App() {
   useEffect(() => {
     if (!collectionsReady || !bridge || !loadedChannel.current) return;
     const channelId = loadedChannel.current;
-    const snapshot = { channelId, favorites, playlists, recentTrackIds, albumOverrides,
+    const snapshot = { channelId, favorites, playlists, recentTrackIds, albumOverrides, coverOverrides,
       queue: { trackIds: queue.trackIds, currentTrackId: currentTrackId(queue), repeat: queue.repeat } };
     const timer = setTimeout(() => {
       saveTail.current = saveTail.current.catch(() => {}).then(() =>
@@ -352,7 +373,7 @@ export default function App() {
         'Could not save collections'));
     }, 350);
     return () => clearTimeout(timer);
-  }, [bridge, collectionsReady, favorites, playlists, queue, recentTrackIds, albumOverrides]);
+  }, [bridge, collectionsReady, favorites, playlists, queue, recentTrackIds, albumOverrides, coverOverrides]);
 
   const loadChannels = useCallback(async (connection: Bridge) => {
     if (channelsFetched.current) return;
@@ -738,6 +759,23 @@ export default function App() {
     setAlbumEditName('');
   }
 
+  function saveCoverUrl() {
+    if (!selected) return;
+    const url = coverEditUrl.trim();
+    if (url && (url.length > 1000 || !/^https:\/\/[^\s]+$/i.test(url))) {
+      setCoverError('Use an HTTPS image URL, or leave the field blank to restore automatic artwork.');
+      return;
+    }
+    setCoverOverrides(current => {
+      const next = { ...current };
+      if (url) next[selected.id] = url;
+      else delete next[selected.id];
+      return next;
+    });
+    setCoverError('');
+    setCoverEditOpen(false);
+  }
+
   useEffect(() => {
     if (!sleepUntil) return;
     const timer = setInterval(() => {
@@ -764,7 +802,7 @@ export default function App() {
     page === 'nowPlaying' ? 'Now playing' : page === 'favorites' ? 'Liked songs' :
     page === 'playlists' ? 'Playlists' : page === 'recent' ? 'Recently played' : 'Play queue';
 
-  return <View style={s.root}>
+  return <ArtworkContext.Provider value={{ bridge, overrides: coverOverrides, albums: albumOverrides }}><View style={s.root}>
     <StatusBar barStyle="light-content" backgroundColor={c.bg} />
     <View style={s.body}>
       {wide && <View style={s.sidebar}>
@@ -1000,6 +1038,19 @@ export default function App() {
                   { width: `${duration ? Math.min(100, position / duration * 100) : 0}%` }]} /></Pressable>
               <Text style={s.time}>{clock(duration)}</Text></View>
             <Text style={s.nowPageMeta}>{albumOverrides[selected?.id ?? ''] || 'Album not set'} · {speed}× speed</Text>
+            {selected && <Pressable accessibilityRole="button" accessibilityLabel="Edit current song cover"
+              onPress={() => { setCoverEditUrl(coverOverrides[selected.id] ?? ''); setCoverError('');
+                setCoverEditOpen(!coverEditOpen); }} style={s.coverEditButton}>
+              <Text style={s.coverEditText}>Edit cover</Text></Pressable>}
+            {selected && coverEditOpen && <View style={s.coverEditPanel}>
+              <Text style={s.panelHelp}>Paste an HTTPS image URL. Leave it blank to use automatic artwork.</Text>
+              <TextInput accessibilityLabel="Custom cover URL" placeholder="https://example.com/cover.jpg"
+                placeholderTextColor={c.muted} autoCapitalize="none" autoCorrect={false}
+                value={coverEditUrl} onChangeText={setCoverEditUrl} style={s.coverEditInput} />
+              {coverError ? <Text style={s.authError}>{coverError}</Text> : null}
+              <Pressable accessibilityRole="button" accessibilityLabel="Save custom cover"
+                onPress={saveCoverUrl} style={s.smallPrimary}><Text style={s.smallPrimaryText}>Save cover</Text></Pressable>
+            </View>}
           </View>
         </View>}
         {page === 'albums' && !!albumEditTrackId && <View style={s.playlistPanel}>
@@ -1234,7 +1285,7 @@ export default function App() {
             style={s.volumeTrack}><View style={[s.volumeFill, { width: `${volume * 100}%` }]} /></Pressable>
           <Text style={s.volumeValue}>{Math.round(volume * 100)}%</Text></View></View>}
     </View>
-  </View>;
+  </View></ArtworkContext.Provider>;
 }
 
 function RowAction({ icon, label, active = false, disabled = false, onPress }:
@@ -1271,6 +1322,7 @@ function RecordArt({ track, large = false, compact = false }:
       <View style={s.artOrbitDot} /><Text style={[s.artInitial, large && s.recordLetterLarge]}>{letter}</Text>
     </View>}
     <View style={s.recordStripe} />
+    <ArtworkImage track={track} />
   </View>;
 }
 
@@ -1509,6 +1561,12 @@ const s = StyleSheet.create({
   artOrbitDot: { position: 'absolute', top: 8, right: 4, width: 13, height: 13,
     borderRadius: 7, backgroundColor: c.accent },
   recordStripe: { position: 'absolute', right: 0, bottom: 0, width: 54, height: 6, backgroundColor: c.accent },
+  coverImage: { ...StyleSheet.absoluteFillObject, width: '100%', height: '100%' },
+  coverEditButton: { alignSelf: 'flex-start', marginTop: 15, paddingVertical: 6 },
+  coverEditText: { color: c.soft, fontSize: 12, fontWeight: '700' },
+  coverEditPanel: { marginTop: 7, gap: 9, maxWidth: 440 },
+  coverEditInput: { color: c.text, backgroundColor: c.raised, borderRadius: 8,
+    borderWidth: 1, borderColor: c.line, paddingHorizontal: 11, paddingVertical: 8 },
   homeShelf: { marginBottom: 22 },
   shelfHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   shelfLink: { color: c.soft, fontSize: 12, fontWeight: '700' },
@@ -1569,7 +1627,8 @@ const s = StyleSheet.create({
   unavailableRow: { opacity: 0.45 },
   activeRowText: { color: c.soft },
   rowNumber: { color: c.muted, width: 22, fontSize: 11 },
-  cover: { width: 40, height: 40, borderRadius: 7, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  cover: { width: 40, height: 40, borderRadius: 7, alignItems: 'center', justifyContent: 'center', marginRight: 10,
+    overflow: 'hidden' },
   coverLarge: { width: 48, height: 48, borderRadius: 9 },
   coverGlyph: { color: '#ffffff', fontSize: 20, fontWeight: '800', opacity: 0.9 },
   coverGlyphLarge: { fontSize: 24 },

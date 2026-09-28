@@ -9,6 +9,8 @@ import { CHUNK_BYTES, fetchTelegramChunk, isStaleFileReference } from './chunks.
 import { AudioRangeCache, cacheLimitFromEnv } from './audio-cache.mjs';
 import { CollectionsStore } from './collections-store.mjs';
 import { OfflineStore } from './offline-store.mjs';
+import { ArtworkStore } from './artwork-store.mjs';
+import { archiveArtwork, telegramArtwork } from './artwork-source.mjs';
 import { mergeRecentTracks, parseLibraryCache } from './library-cache.mjs';
 import { createAuthFlow } from './auth-flow.mjs';
 import { readSession, removeSession, saveSession } from './session-store.mjs';
@@ -23,6 +25,7 @@ const CONNECTION_PATH = resolve(DATA_DIR, 'bridge-connection.json');
 const LIBRARY_CACHE_PATH = resolve(DATA_DIR, 'bridge-library.json');
 const COLLECTIONS_PATH = resolve(DATA_DIR, 'collections.json');
 const OFFLINE_DIR = resolve(DATA_DIR, 'offline');
+const ARTWORK_DIR = resolve(DATA_DIR, 'artwork');
 const MAX_MESSAGES = 2000;
 const SYNC_BATCH = 100;
 const SYNC_INTERVAL_MS = 60_000;
@@ -31,6 +34,7 @@ const token = randomBytes(24).toString('hex');
 const audioCache = new AudioRangeCache(cacheLimitFromEnv(process.env.TELOPOTIFY_CACHE_MB));
 const collectionsStore = new CollectionsStore(COLLECTIONS_PATH);
 const offlineStore = new OfflineStore(OFFLINE_DIR);
+const artworkStore = new ArtworkStore(ARTWORK_DIR);
 
 let client = null;
 let authFlow = null;
@@ -315,6 +319,7 @@ async function logout() {
     unlink(LIBRARY_CACHE_PATH).catch(error => { if (error.code !== 'ENOENT') throw error; }),
     collectionsStore.clear(),
     offlineStore.clear(),
+    artworkStore.clear(),
   ]);
 }
 
@@ -437,6 +442,30 @@ async function handle(request, response) {
       if (value.channelId !== selectedChannelId) return json(response, 409, { error: 'Channel changed' });
       return json(response, 200, await collectionsStore.put(selectedChannelId, value));
     }
+    const artMatch = /^\/artwork\/(\d+)$/.exec(url.pathname);
+    if (artMatch && request.method === 'GET') {
+      if (!selectedChannelId) return json(response, 404, { error: 'No channel selected' });
+      const track = tracks.find(item => item.messageId === Number(artMatch[1]));
+      if (!track) return json(response, 404, { error: 'Song not found' });
+      const artChannel = selectedChannelId;
+      const artDialog = selectedDialog;
+      const artClient = client;
+      const albumParam = url.searchParams.get('album');
+      const album = albumParam !== null && albumParam.length <= 100 ? albumParam.trim() :
+        collectionsStore.get(artChannel).albumOverrides[String(track.messageId)] ?? '';
+      const result = await artworkStore.resolve(artChannel, track, async () => {
+        if (!artClient?.connected || !artDialog) throw new Error('Telegram is offline');
+        const message = selectedChannelId === artChannel ? messages.get(track.messageId) : null;
+        const resolved = message ?? (await artClient.getMessages(artDialog.inputEntity, {
+          ids: track.messageId,
+        }))[0];
+        return resolved ? telegramArtwork(artClient, resolved) : null;
+      }, () => archiveArtwork(track, album), album);
+      if (!result) return json(response, 404, { error: 'Artwork unavailable' });
+      response.writeHead(200, { 'Content-Type': result.mime, 'Content-Length': result.bytes.length,
+        'Cache-Control': 'private, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
+      return response.end(result.bytes);
+    }
     const match = /^\/audio\/(\d+)$/.exec(url.pathname);
     if (!match) return json(response, 404, { error: 'Not found' });
     if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -520,6 +549,7 @@ async function main() {
   await mkdir(DATA_DIR, { recursive: true });
   await collectionsStore.load().catch(() => console.warn('Saved collections are unavailable.'));
   await offlineStore.load().catch(() => console.warn('Saved offline songs are unavailable.'));
+  await artworkStore.load().catch(() => console.warn('Saved artwork is unavailable.'));
   const server = createServer(handle);
   await new Promise((done, reject) => {
     server.once('error', reject);

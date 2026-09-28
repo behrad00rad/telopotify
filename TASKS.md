@@ -40,7 +40,7 @@ Done when: the user can sign in, restart without reauthenticating, and remove th
 
 ### T04 — Select a channel and index its songs
 - [x] Let the user select an accessible channel in the Windows app through the local development bridge. The bridge listed 58 accessible channels and indexed the selected 1,120-song channel.
-- [ ] Index audio messages incrementally, recording message references and available title, artist, duration, filename, and artwork metadata. New music posts now sync from a saved message cursor; filename and artwork metadata remain.
+- [ ] Index audio messages incrementally, recording message references and available title, artist, duration, filename, and artwork metadata. New music posts sync from a saved message cursor. Artwork is resolved on demand from Telegram, with filename metadata still pending.
 - [ ] Handle incomplete metadata, duplicates, removed messages, and access errors. Missing songs are now marked unavailable on a confirmed Telegram lookup and removed from the active queue; broader access-error cases remain.
 - [x] Persist the index locally and sync new posts without re-fetching the whole history. The bridge restores the cached catalog and checks newer messages on restart, every minute, or with the Sync button.
 
@@ -59,7 +59,7 @@ Done when: playback starts before a complete song download, seeking works, and s
 - [x] Create the library, search, now-playing view, persistent player controls, and queue view. The current Windows layout also includes Home, Artists, Albums, Liked songs, Playlists, and Recent.
 - [ ] Support desktop keyboard/mouse interactions and iPhone touch layouts.
 - [ ] Add accessible labels, focus states, readable contrast, and useful empty/loading/error states. The Windows layout has had a live visual review and now shows playback interruption, Retry, unavailable songs, and cache usage; keyboard focus polish remains.
-- [x] Use real indexed metadata, with graceful fallbacks for missing artwork or titles. Albums are local labels because the current Telegram catalog lacks album fields.
+- [x] Use real indexed metadata, with graceful fallbacks for missing artwork or titles. Album art is fetched lazily from Telegram, then MusicBrainz/Cover Art Archive when needed, with a manual URL override. Albums are local labels because the current Telegram catalog lacks album fields.
 
 Done when: the user can find and play music comfortably at desktop and phone sizes.
 

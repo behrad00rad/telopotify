@@ -8,6 +8,7 @@ import { CollectionsStore, emptyCollections, normalizeCollections } from './coll
 test('normalizes playlists, favorites, and a restorable queue', () => {
   const result = normalizeCollections({ favorites: ['7', '7', '8'], recentTrackIds: ['8', '7', '8'],
     albumOverrides: { 7: '  Night Drive  ' },
+    coverOverrides: { 7: 'https://example.com/cover.jpg' },
     playlists: [{ id: 'mix-1', name: '  Road trip  ', trackIds: ['8', '7', '8'] }],
     queue: { trackIds: ['7', '8'], currentTrackId: '8', repeat: 'all' } });
   assert.deepEqual(result.favorites, ['7', '8']);
@@ -15,6 +16,9 @@ test('normalizes playlists, favorites, and a restorable queue', () => {
   assert.equal(result.queue.currentTrackId, '8');
   assert.deepEqual(result.recentTrackIds, ['8', '7']);
   assert.deepEqual(result.albumOverrides, { 7: 'Night Drive' });
+  assert.deepEqual(result.coverOverrides, { 7: 'https://example.com/cover.jpg' });
+  assert.throws(() => normalizeCollections({ ...result, coverOverrides: { 7: 'http://example.com/cover.jpg' } }),
+    /Invalid cover URL/);
   assert.throws(() => normalizeCollections({ ...result, playlists: [{ id: 'bad', name: '', trackIds: [] }] }),
     /Invalid collections/);
 });
