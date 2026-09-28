@@ -12,6 +12,9 @@
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		A90100000000000000000001 /* TelopotifyAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90100000000000000000003 /* TelopotifyAudio.swift */; };
 		A90100000000000000000002 /* TelopotifyAudioBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = A90100000000000000000004 /* TelopotifyAudioBridge.m */; };
+		A90200000000000000000001 /* TelopotifyTelegram.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90200000000000000000003 /* TelopotifyTelegram.swift */; };
+		A90200000000000000000002 /* TelopotifyTelegramBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = A90200000000000000000004 /* TelopotifyTelegramBridge.m */; };
+		A90200000000000000000005 /* TDLibKit in Frameworks */ = {isa = PBXBuildFile; productRef = A90200000000000000000007 /* TDLibKit */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 /* End PBXBuildFile section */
 
@@ -26,6 +29,8 @@
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = TelopotifyApp/AppDelegate.swift; sourceTree = "<group>"; };
 		A90100000000000000000003 /* TelopotifyAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TelopotifyAudio.swift; path = TelopotifyApp/TelopotifyAudio.swift; sourceTree = "<group>"; };
 		A90100000000000000000004 /* TelopotifyAudioBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = TelopotifyAudioBridge.m; path = TelopotifyApp/TelopotifyAudioBridge.m; sourceTree = "<group>"; };
+		A90200000000000000000003 /* TelopotifyTelegram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TelopotifyTelegram.swift; path = TelopotifyApp/TelopotifyTelegram.swift; sourceTree = "<group>"; };
+		A90200000000000000000004 /* TelopotifyTelegramBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = TelopotifyTelegramBridge.m; path = TelopotifyApp/TelopotifyTelegramBridge.m; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = TelopotifyApp/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -36,6 +41,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0C80B921A6F3F58F76C31292 /* libPods-TelopotifyApp.a in Frameworks */,
+				A90200000000000000000005 /* TDLibKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -49,11 +55,16 @@
 				761780EC2CA45674006654EE /* AppDelegate.swift */,
 				A90100000000000000000003 /* TelopotifyAudio.swift */,
 				A90100000000000000000004 /* TelopotifyAudioBridge.m */,
+				A90200000000000000000003 /* TelopotifyTelegram.swift */,
+				A90200000000000000000004 /* TelopotifyTelegramBridge.m */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
 			);
 			name = TelopotifyApp;
+			packageProductDependencies = (
+				A90200000000000000000007 /* TDLibKit */,
+			);
 			sourceTree = "<group>";
 		};
 		2D16E6871FA4F8E400B85C8A /* Frameworks */ = {
@@ -149,6 +160,9 @@
 				Base,
 			);
 			mainGroup = 83CBB9F61A601CBA00E9B192;
+			packageReferences = (
+				A90200000000000000000006 /* XCRemoteSwiftPackageReference "TDLibKit" */,
+			);
 			productRefGroup = 83CBBA001A601CBA00E9B192 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -253,10 +267,31 @@
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
 				A90100000000000000000001 /* TelopotifyAudio.swift in Sources */,
 				A90100000000000000000002 /* TelopotifyAudioBridge.m in Sources */,
+				A90200000000000000000001 /* TelopotifyTelegram.swift in Sources */,
+				A90200000000000000000002 /* TelopotifyTelegramBridge.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A90200000000000000000006 /* XCRemoteSwiftPackageReference "TDLibKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Swiftgram/TDLibKit.git";
+			requirement = {
+				kind = revision;
+				revision = 8aba00c43595c12fbd2c2235fd5947362a94b623;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A90200000000000000000007 /* TDLibKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A90200000000000000000006 /* XCRemoteSwiftPackageReference "TDLibKit" */;
+			productName = TDLibKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		13B07F941A680F5B00A75B9A /* Debug */ = {

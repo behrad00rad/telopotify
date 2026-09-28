@@ -23,11 +23,13 @@ catalog, media cache, and playback queue.
    current bridge; iOS uses TDLib directly. Add iPhone-sized layouts and secure
    session storage.
 
-The iOS background audio capability and a native AVPlayer module are in the
-repository. The module currently accepts playable URLs; the TDLib-backed
-resource loader and direct iOS data provider are still required before this is
-a standalone iPhone player. Telegram's public sample API credentials are only
-for development. A dedicated API ID/hash are required before distribution.
+The iOS background audio capability, native AVPlayer module, and a phone-side
+TDLib sign-in module are in the repository. The iPhone app now opens its own
+Telegram session in private app storage, independently of Windows. It does not
+yet list channels or play their songs: channel indexing, a TDLib-backed media
+resource loader, and iOS library/player screens are the next milestones.
+Telegram's public sample API credentials are only for development. A dedicated
+API ID/hash are required before distribution.
 
 ## Device acceptance checks
 
@@ -40,6 +42,6 @@ for development. A dedicated API ID/hash are required before distribution.
   out, and cached music remains available.
 - Confirm the on-device cache stays within its configured size.
 
-iOS compilation, signing, simulator use, and device testing require Xcode on a
-Mac. Repository work can continue on Windows, but these checks must wait for
-Mac access.
+GitHub Actions compiles an unsigned iOS Simulator build on a hosted Mac.
+Signing, installing on an iPhone, and device acceptance checks still require
+Mac/Xcode access and an Apple developer signing setup.
