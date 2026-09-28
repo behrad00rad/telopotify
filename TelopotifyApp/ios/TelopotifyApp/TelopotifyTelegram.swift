@@ -119,6 +119,65 @@ final class TelopotifyTelegram: RCTEventEmitter {
     }
   }
 
+  @objc(listChannels:rejecter:)
+  func listChannels(_ resolve: @escaping RCTPromiseResolveBlock,
+                    rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard state == "authorizationStateReady" else {
+      reject("telegram", "Sign in to Telegram first", nil)
+      return
+    }
+    // Loading chat positions populates TDLib's local list without fetching media.
+    request(["@type": "loadChats", "limit": 200]) { _ in
+      self.request(["@type": "getChats", "limit": 200]) { result in
+        guard let ids = result["chat_ids"] as? [NSNumber] else {
+          reject("telegram", result["message"] as? String ?? "Could not list chats", nil)
+          return
+        }
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var channels: [[String: String]] = []
+        for id in ids {
+          group.enter()
+          self.request(["@type": "getChat", "chat_id": id]) { chat in
+            defer { group.leave() }
+            guard let type = chat["type"] as? [String: Any],
+                  type["@type"] as? String == "chatTypeSupergroup",
+                  type["is_channel"] as? Bool == true,
+                  let title = chat["title"] as? String else { return }
+            lock.lock()
+            channels.append(["id": id.stringValue, "title": title])
+            lock.unlock()
+          }
+        }
+        group.notify(queue: .main) {
+          resolve(channels.sorted { $0["title", default: ""] < $1["title", default: ""] })
+        }
+      }
+    }
+  }
+
+  @objc(selectChannel:resolver:rejecter:)
+  func selectChannel(_ id: String, resolver resolve: RCTPromiseResolveBlock,
+                     rejecter reject: RCTPromiseRejectBlock) {
+    guard let chatId = Int64(id) else { reject("telegram", "Invalid channel", nil); return }
+    request(["@type": "getChat", "chat_id": chatId]) { result in
+      guard let type = result["type"] as? [String: Any],
+            type["@type"] as? String == "chatTypeSupergroup",
+            type["is_channel"] as? Bool == true else {
+        reject("telegram", "Channel is unavailable", nil)
+        return
+      }
+      UserDefaults.standard.set(id, forKey: "telopotify.channelId")
+      resolve(["id": id, "title": result["title"] as? String ?? "Channel"])
+    }
+  }
+
+  @objc(getSelectedChannel:rejecter:)
+  func getSelectedChannel(_ resolve: RCTPromiseResolveBlock,
+                          rejecter reject: RCTPromiseRejectBlock) {
+    resolve(UserDefaults.standard.string(forKey: "telopotify.channelId"))
+  }
+
   private func finish(_ result: [String: Any], resolve: RCTPromiseResolveBlock,
                       reject: RCTPromiseRejectBlock) {
     if result["@type"] as? String == "error" {

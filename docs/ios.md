@@ -25,9 +25,10 @@ catalog, media cache, and playback queue.
 
 The iOS background audio capability, native AVPlayer module, and a phone-side
 TDLib sign-in module are in the repository. The iPhone app now opens its own
-Telegram session in private app storage, independently of Windows. It does not
-yet list channels or play their songs: channel indexing, a TDLib-backed media
-resource loader, and iOS library/player screens are the next milestones.
+Telegram session in private app storage, independently of Windows, and lists
+channels for selection. It does not yet play their songs: channel message
+indexing, a TDLib-backed media resource loader, and iOS library/player screens
+are the next milestones.
 Telegram's public sample API credentials are only for development. A dedicated
 API ID/hash are required before distribution.
 

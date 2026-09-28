@@ -1,16 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import {
-  NativeEventEmitter, NativeModules, SafeAreaView, StatusBar, StyleSheet,
+  NativeEventEmitter, NativeModules, SafeAreaView, ScrollView, StatusBar, StyleSheet,
   Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 
 type AuthState = { state: string; error?: string };
+type Channel = { id: string; title: string };
 type TelegramModule = {
   start(): Promise<AuthState>;
   getState(): Promise<AuthState>;
   sendPhone(phone: string): Promise<unknown>;
   sendCode(code: string): Promise<unknown>;
   sendPassword(password: string): Promise<unknown>;
+  listChannels(): Promise<Channel[]>;
+  selectChannel(id: string): Promise<Channel>;
+  getSelectedChannel(): Promise<string | null>;
 };
 
 const telegram = NativeModules.TelopotifyTelegram as TelegramModule;
@@ -20,6 +24,9 @@ export default function IOSApp() {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [loadingChannels, setLoadingChannels] = useState(false);
 
   useEffect(() => {
     const events = new NativeEventEmitter(NativeModules.TelopotifyTelegram);
@@ -40,6 +47,31 @@ export default function IOSApp() {
   const acceptsInput = phone || code || password;
   const prompt = phone ? 'Your Telegram phone number' : code ? 'Code from Telegram' : 'Two-step verification password';
 
+  async function refreshChannels() {
+    setLoadingChannels(true);
+    setError('');
+    try {
+      const [saved, available] = await Promise.all([
+        telegram.getSelectedChannel(), telegram.listChannels(),
+      ]);
+      setSelected(saved);
+      setChannels(available);
+    } catch (e) { setError(String(e)); }
+    finally { setLoadingChannels(false); }
+  }
+
+  useEffect(() => {
+    if (ready) { refreshChannels(); }
+  }, [ready]);
+
+  async function chooseChannel(channel: Channel) {
+    try {
+      await telegram.selectChannel(channel.id);
+      setSelected(channel.id);
+      setError('');
+    } catch (e) { setError(String(e)); }
+  }
+
   async function submit() {
     if (!input.trim() || busy) { return; }
     setBusy(true);
@@ -57,9 +89,9 @@ export default function IOSApp() {
     <View style={styles.content}>
       <View style={styles.mark}><Text style={styles.markText}>T</Text></View>
       <Text style={styles.eyebrow}>TELOPOTIFY FOR IPHONE</Text>
-      <Text style={styles.title}>{ready ? 'Connected to Telegram' : 'Your music, anywhere.'}</Text>
+      <Text style={styles.title}>{ready ? 'Choose your channel' : 'Your music, anywhere.'}</Text>
       <Text style={styles.description}>{ready
-        ? 'Your Telegram session is stored on this iPhone. Channel browsing and streaming are coming next.'
+        ? 'Your Telegram session lives on this iPhone. Pick the channel that holds your songs.'
         : acceptsInput ? prompt : 'Preparing a direct connection to Telegram on this iPhone…'}</Text>
       {acceptsInput && <>
         <TextInput
@@ -73,6 +105,20 @@ export default function IOSApp() {
         </TouchableOpacity>
       </>}
       {!!error && <Text style={styles.error}>{error}</Text>}
+      {ready && <>
+        <ScrollView style={styles.channelList} contentContainerStyle={styles.channelListContent}>
+        {channels.map(channel => <TouchableOpacity key={channel.id} accessibilityRole="button"
+          style={styles.channel} onPress={() => chooseChannel(channel)}>
+          <View style={styles.channelAvatar}><Text style={styles.channelAvatarText}>{channel.title.slice(0, 1).toUpperCase()}</Text></View>
+          <Text style={styles.channelTitle} numberOfLines={1}>{channel.title}</Text>
+          {selected === channel.id && <Text style={styles.check}>✓</Text>}
+        </TouchableOpacity>)}
+        </ScrollView>
+        <TouchableOpacity accessibilityRole="button" onPress={refreshChannels}>
+          <Text style={styles.retry}>{loadingChannels ? 'Loading channels…' : 'Refresh channels'}</Text>
+        </TouchableOpacity>
+        {selected && <Text style={styles.note}>Channel selected. Song indexing and streaming are the next step.</Text>}
+      </>}
       {!acceptsInput && !ready && <TouchableOpacity accessibilityRole="button" onPress={() => {
         telegram.getState().then(setAuth).catch(e => setError(String(e)));
       }}><Text style={styles.retry}>Check connection</Text></TouchableOpacity>}
@@ -97,4 +143,13 @@ const styles = StyleSheet.create({
   buttonText: { color: '#10151c', fontSize: 16, fontWeight: '700' },
   error: { color: '#ff9b9b', fontSize: 14, marginTop: 16 },
   retry: { color: '#ed9b58', fontSize: 15, fontWeight: '600' },
+  channel: { flexDirection: 'row', alignItems: 'center', minHeight: 62, marginBottom: 8 },
+  channelList: { flexGrow: 0, maxHeight: 360, marginBottom: 20 },
+  channelListContent: { paddingBottom: 4 },
+  channelAvatar: { width: 42, height: 42, borderRadius: 10, backgroundColor: '#243f55',
+    alignItems: 'center', justifyContent: 'center', marginRight: 14 },
+  channelAvatarText: { color: '#eff5fa', fontSize: 18, fontWeight: '700' },
+  channelTitle: { color: '#f6f7f8', fontSize: 16, flex: 1 },
+  check: { color: '#ed9b58', fontSize: 22, marginLeft: 12 },
+  note: { color: '#a4afbb', marginTop: 28, fontSize: 14, lineHeight: 21 },
 });
