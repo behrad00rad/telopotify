@@ -235,7 +235,7 @@ final class TelopotifyTelegram: RCTEventEmitter {
   // AVAssetResourceLoader asks for one bounded range at a time. TDLib keeps
   // its own sparse file on disk; no audio bytes cross the React Native bridge.
   func downloadRange(fileId: Int, offset: Int64, length: Int,
-                     completion: @escaping (Result<Data, Error>) -> Void) {
+                     completion: @escaping (Result<Data, Swift.Error>) -> Void) {
     request([
       "@type": "downloadFile", "file_id": fileId, "priority": 32,
       "offset": offset, "limit": length, "synchronous": true,
