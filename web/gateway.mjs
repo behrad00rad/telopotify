@@ -13,7 +13,7 @@ const files = new Map([
   ['/web/styles.css', [resolve('web/styles.css'), 'text/css; charset=utf-8']],
   ['/web/logo.png', [resolve('TelopotifyApp/assets/telopotify-logo.png'), 'image/png']],
 ]);
-const apiPaths = new Set(['/status', '/reconnect', '/auth/start', '/auth/input',
+const apiPaths = new Set(['/status', '/reconnect', '/auth/start', '/auth/input', '/auth/cancel',
   '/channels', '/channels/select', '/library', '/library/sync', '/collections']);
 const hash = value => createHash('sha256').update(value).digest();
 const sessions = new Map();

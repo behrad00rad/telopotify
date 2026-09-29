@@ -56,8 +56,10 @@ Do not expose the local bridge ports. Use persistent storage for
 
 The included Telegram Desktop API credentials remain **test-only**. Before
 releasing a public service, set `TELOPOTIFY_API_ID` and `TELOPOTIFY_API_HASH`
-to your own app credentials. On Windows, Telegram sessions are encrypted with
-DPAPI by default. On Linux or other hosted systems, set a stable
+to your own app credentials. The local Windows desktop bridge uses DPAPI;
+the multi-user web server creates an ignored `local-data/web-accounts/session.key`
+on Windows and uses it to encrypt its Telegram sessions without PowerShell.
+Keep this file with the account data across restarts. On Linux or other hosted systems, set a stable
 `TELOPOTIFY_SESSION_KEY` to a base64-encoded 32-byte secret before starting the
 server; preserve that key securely or saved Telegram sessions cannot be
 restored. Web account passwords are stored as salted scrypt hashes. Web login

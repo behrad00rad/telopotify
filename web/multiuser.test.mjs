@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,10 +16,12 @@ import {resolve} from 'node:path';
 const folder=process.env.TELOPOTIFY_DATA_DIR;
 const server=createServer((req,res)=>{const u=new URL(req.url,'http://localhost');
 if(u.searchParams.get('token')!=='bridge-secret'){res.writeHead(401);res.end();return;}
-res.setHeader('Content-Type','application/json');res.end(JSON.stringify({folder,path:u.pathname}));});
+res.setHeader('Content-Type','application/json');res.end(JSON.stringify({folder,path:u.pathname,
+sessionKeyReady:Buffer.from(process.env.TELOPOTIFY_SESSION_KEY||'','base64').length===32}));});
 server.listen(0,'127.0.0.1',async()=>{await mkdir(folder,{recursive:true});
 await writeFile(resolve(folder,'bridge-connection.json'),JSON.stringify({address:'http://127.0.0.1:'+server.address().port+'?token=bridge-secret'}));});`);
-  const server = await createMultiuserServer({dataDir: resolve(dir, 'accounts'), bridgeScript: mock});
+  const server = await createMultiuserServer({dataDir: resolve(dir, 'accounts'), bridgeScript: mock,
+    sessionKey: randomBytes(32).toString('base64')});
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -42,6 +45,8 @@ await writeFile(resolve(folder,'bridge-connection.json'),JSON.stringify({address
     const body2 = await status2.json();
     assert.notEqual(body1.folder, body2.folder);
     assert.equal(body1.path, '/status');
+    assert.equal(body1.sessionKeyReady, true);
+    assert.equal(body2.sessionKeyReady, true);
     assert.equal((await fetch(base + '/bootstrap', {headers: {Cookie: cookie1}})).status, 404);
     assert.equal((await post('/web/login', {username: 'first_user', password: 'wrong-password'})).status, 401);
     const login = await post('/web/login', {username: 'first_user', password: 'first-password-123'});

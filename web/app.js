@@ -8,7 +8,7 @@ const state = {
   token: '', remote: false, multiuser: false, accountMode: 'login', webAuthenticated: true, status: null, tracks: [], channel: '', channelId: null, revision: -1,
   channels: [], channelsFetched: false, collections: null, page: 'Home', query: '',
   group: null, currentId: null, playQueue: [], queueSource: [], shuffle: false, repeat: 'off', modal: null, drawer: false, queueLimit: 50, limit: 100,
-  loadingLibrary: false, busy: false, notice: '',
+  loadingLibrary: false, busy: false, authPending: false, authError: '', serverUnavailable: false, notice: '',
 };
 let saveTail = Promise.resolve();
 
@@ -35,11 +35,12 @@ function button(action, label, iconName, extra = '') {
   return `<button class="icon-btn ${extra}" data-action="${action}" aria-label="${esc(label)}" title="${esc(label)}">${icon(iconName)}</button>`;
 }
 async function api(path, data) {
-  const response = await fetch(urlFor(path), {
+  let response;
+  try { response = await fetch(urlFor(path), {
     method: data === undefined ? 'GET' : 'POST',
     headers: data === undefined ? undefined : {'Content-Type': 'application/json'},
     body: data === undefined ? undefined : JSON.stringify(data),
-  });
+  }); } catch { throw new Error('Cannot reach the Telopotify server. Check its connection and try again.'); }
   const result = await response.json();
   if (!response.ok) {
     const error = new Error(result.error || `Request failed (${response.status})`);
@@ -59,6 +60,8 @@ function clearWebSession() {
   state.channel = ''; state.channelId = null; state.revision = -1;
   state.currentId = null; state.playQueue = []; state.queueSource = [];
   state.modal = null; state.drawer = false;
+  state.serverUnavailable = false; state.authError = ''; state.authPending = false;
+  state.notice = '';
 }
 function renderNotice() {
   const notice = $('#notice');
@@ -100,6 +103,8 @@ async function refreshStatus(force = false) {
   try {
     const previous = state.status;
     const status = await api('/status');
+    if (state.serverUnavailable) { state.serverUnavailable = false; state.notice = ''; renderNotice(); }
+    if (previous?.step !== status.step || previous?.error !== status.error) state.authError = '';
     state.status = status;
     renderStatus();
     if (status.authenticated && status.selected) {
@@ -108,13 +113,19 @@ async function refreshStatus(force = false) {
     } else if (status.authenticated && !status.selected) {
       if (!state.channelsFetched) await loadChannels();
       else if (previous?.selected) render();
-    } else if (!previous || previous.step !== status.step || previous.authenticated !== status.authenticated) {
+    } else if (!previous || previous.step !== status.step || previous.error !== status.error ||
+        previous.errorCode !== status.errorCode || previous.authenticated !== status.authenticated ||
+        previous.authInProgress !== status.authInProgress) {
       render();
     }
   } catch (error) {
     if (state.remote && error.status === 401) {
       clearWebSession(); render();
-    } else errorMessage(error);
+    } else {
+      state.serverUnavailable = true;
+      errorMessage(error);
+      if (!state.status) render();
+    }
   }
 }
 function nav() {
@@ -184,7 +195,7 @@ function playlistPage() {
 }
 function content() {
   if (state.remote && !state.webAuthenticated) return webLogin();
-  if (!state.status) return '<div class="loading">Connecting to your music…</div>';
+  if (!state.status) return state.serverUnavailable ? `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">CONNECTION PROBLEM</div><h1>Music service unavailable.</h1><p>${esc(state.notice)}</p><button class="pill dark" data-action="retry-status">Try again</button></div>` : '<div class="loading">Connecting to your music…</div>';
   if (!state.status.authenticated) return setup();
   if (!state.status.selected) return channelsPage();
   if (state.group) {
@@ -216,10 +227,20 @@ function setup() {
   const step = state.status.step;
   const prompt = {phone: 'Phone number with country code', code: 'Telegram login code',
     password: 'Two-step password', email: 'Email address', emailCode: 'Email verification code'}[step];
+  const hint = {phone: 'Enter your number in international format, including the country code.',
+    code: 'Enter the code Telegram sent to your Telegram app or phone.',
+    password: 'Enter the two-step verification password for this Telegram account.',
+    email: 'Enter the email address Telegram requested for verification.',
+    emailCode: 'Enter the code Telegram sent to that email address.'}[step];
+  const activity = state.authPending ? 'Submitting your answer…' : step === 'checking' ?
+    'Checking your answer with Telegram…' : state.status.authInProgress ?
+      'Connecting to Telegram and waiting for its response…' : 'Connecting to Telegram…';
   return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">WELCOME TO TELOPOTIFY</div>
     <h1>Your music starts here.</h1><p>${state.multiuser ? 'Sign in to your Telegram account. This session and its music library belong only to your web account.' : state.remote ? 'Sign in through the private Telopotify service on the Windows PC.' : 'Sign in to Telegram on this computer.'} Songs stream as needed.</p>
-    ${prompt ? `<form id="auth-form"><input id="auth-value" ${step === 'password' ? 'type="password"' : 'type="text"'} placeholder="${prompt}" aria-label="${prompt}" autocomplete="off" required><button class="pill" type="submit">Continue</button></form>` : `<p>Connecting to Telegram…</p><button class="pill dark" data-action="reconnect">Retry connection</button>`}
-    ${state.status.error ? `<p class="setup-error">${esc(state.status.error)}</p>` : ''}</div>`;
+    ${hint && !state.authPending ? `<p class="auth-hint">${hint}</p><form id="auth-form"><input id="auth-value" ${step === 'password' ? 'type="password"' : step === 'phone' ? 'type="tel"' : 'type="text"'} placeholder="${prompt}" aria-label="${prompt}" autocomplete="off" required><button class="pill" type="submit">${step === 'phone' ? 'Send code' : 'Continue'}</button></form>` : `<p class="auth-activity" role="status">${activity}</p>`}
+    ${state.status.authInProgress && !state.authPending ? '<button class="text-link auth-cancel" data-action="auth-cancel">Start over</button>' : ''}
+    ${!state.authPending && (state.authError || state.status.error) ? `<p class="setup-error" role="alert">${esc(state.authError || state.status.error)}</p>` : ''}
+    ${!state.authPending && state.status.errorCode ? `<p class="auth-error-code">Error code: ${esc(state.status.errorCode)}</p>` : ''}</div>`;
 }
 function channelsPage() {
   return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">ONE MORE STEP</div><h1>Choose your channel.</h1>
@@ -428,6 +449,11 @@ async function onAction(buttonEl) {
     return;
   }
   if (action === 'reconnect') { await api('/reconnect', {}); await refreshStatus(true); return; }
+  if (action === 'retry-status') { await refreshStatus(true); return; }
+  if (action === 'auth-cancel') {
+    state.authError = ''; state.authPending = false;
+    state.status = await api('/auth/cancel', {}); render(); return;
+  }
   if (action === 'refresh') {
     if (state.status?.selected && state.status.online) await api('/library/sync', {});
     else await api('/reconnect', {});
@@ -456,10 +482,18 @@ document.addEventListener('keydown', event => {
 document.addEventListener('submit', event => {
   event.preventDefault();
   if (event.target.id === 'auth-form') {
+    if (state.authPending) return;
     const step = state.status.step;
     const value = $('#auth-value').value.trim();
+    state.authPending = true; state.authError = ''; render();
     const request = step === 'phone' ? api('/auth/start', {phone: value}) : api('/auth/input', {step, value});
-    request.then(() => refreshStatus()).catch(errorMessage);
+    request.then(async status => {
+      state.status = status; state.authPending = false; state.notice = '';
+      render(); await refreshStatus();
+    }).catch(error => {
+      state.authPending = false; state.authError = error?.message || 'Could not submit this step.';
+      render();
+    });
   }
   if (event.target.id === 'web-login-form') {
     fetch('/web/login', {method: 'POST', headers: {'Content-Type': 'application/json'},

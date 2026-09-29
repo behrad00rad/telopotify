@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, unlink } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +14,7 @@ const files = new Map([
   ['/web/styles.css', [resolve('web/styles.css'), 'text/css; charset=utf-8']],
   ['/web/logo.png', [resolve('TelopotifyApp/assets/telopotify-logo.png'), 'image/png']],
 ]);
-const apiPaths = new Set(['/status', '/reconnect', '/auth/start', '/auth/input', '/auth/logout',
+const apiPaths = new Set(['/status', '/reconnect', '/auth/start', '/auth/input', '/auth/cancel', '/auth/logout',
   '/channels', '/channels/select', '/library', '/library/sync', '/collections']);
 const lifetime = 7 * 24 * 60 * 60 * 1000;
 
@@ -41,9 +41,33 @@ async function bodyOf(request) {
 function cookie(value, maxAge) {
   return `telopotify_account=${value}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${maxAge}`;
 }
+function validSessionKey(value) {
+  const key = Buffer.from(String(value || ''), 'base64');
+  if (key.length !== 32 || key.toString('base64') !== value) {
+    throw new Error('TELOPOTIFY_SESSION_KEY must be a base64-encoded 32-byte key');
+  }
+  return value;
+}
+async function sessionKeyFor(dataDir) {
+  if (process.env.TELOPOTIFY_SESSION_KEY) return validSessionKey(process.env.TELOPOTIFY_SESSION_KEY);
+  if (process.platform !== 'win32') {
+    throw new Error('Set TELOPOTIFY_SESSION_KEY before hosting Telegram sessions on this platform');
+  }
+  // Local Windows development must not depend on spawning PowerShell from a
+  // web worker. Keep the key in ignored account data so sessions survive restarts.
+  const keyPath = resolve(dataDir, 'session.key');
+  await mkdir(dataDir, {recursive: true});
+  try { return validSessionKey((await readFile(keyPath, 'utf8')).trim()); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const value = randomBytes(32).toString('base64');
+  try { await writeFile(keyPath, value, {flag: 'wx', mode: 0o600}); return value; }
+  catch (error) { if (error.code !== 'EEXIST') throw error; }
+  return validSessionKey((await readFile(keyPath, 'utf8')).trim());
+}
 
 export async function createMultiuserServer({dataDir = resolve('local-data/web-accounts'),
-  bridgeScript = resolve('spikes/telegram-client/library-server.mjs')} = {}) {
+  bridgeScript = resolve('spikes/telegram-client/library-server.mjs'), sessionKey: suppliedSessionKey} = {}) {
+  const sessionKey = suppliedSessionKey ? validSessionKey(suppliedSessionKey) : await sessionKeyFor(dataDir);
   const store = new AccountStore(resolve(dataDir, 'accounts.json'));
   await store.load();
   const sessions = new Map();
@@ -67,7 +91,8 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
       await unlink(connectionFile).catch(error => { if (error.code !== 'ENOENT') throw error; });
       const child = spawn(process.execPath, [bridgeScript], {
         cwd: resolve('.'), windowsHide: true, stdio: 'ignore',
-        env: {...process.env, TELOPOTIFY_DATA_DIR: userDir, TELOPOTIFY_BRIDGE_PORT: '0'},
+        env: {...process.env, TELOPOTIFY_DATA_DIR: userDir, TELOPOTIFY_BRIDGE_PORT: '0',
+          TELOPOTIFY_SESSION_KEY: sessionKey},
       });
       entry.child = child;
       let spawnError = null;
@@ -182,9 +207,6 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.platform !== 'win32' && !process.env.TELOPOTIFY_SESSION_KEY) {
-    throw new Error('Set TELOPOTIFY_SESSION_KEY before hosting Telegram sessions on this platform');
-  }
   const server = await createMultiuserServer();
   server.listen(43129, '127.0.0.1', () => {
     console.log('Multi-user development web app ready at http://127.0.0.1:43129/web');

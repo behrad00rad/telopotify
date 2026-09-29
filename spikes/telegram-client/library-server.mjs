@@ -331,7 +331,8 @@ function status() {
   return {
     authenticated, online: isTelegramOnline(),
     step: initializing || reconnecting ? 'connecting' : authenticated ? 'authorized' : flow?.step ?? 'phone',
-    error: flow?.error ?? '', channel, trackCount: tracks.length,
+    error: flow?.error ?? '', errorCode: flow?.diagnostic ?? '',
+    authInProgress: Boolean(authFlow), channel, trackCount: tracks.length,
     selected: Boolean(selectedDialog), indexing, syncing, catalogRevision,
     lastSyncedAt, syncError, cache: audioCache.stats(), offline: selectedChannelId ?
       offlineStore.status(selectedChannelId) : null, unavailableTrackIds: [...unavailable],
@@ -431,6 +432,14 @@ async function handle(request, response) {
       if (!authFlow) return json(response, 409, { error: 'Sign-in has not started' });
       authFlow.submit(step, value);
       return json(response, 202, status());
+    }
+    if (url.pathname === '/auth/cancel' && request.method === 'POST') {
+      authFlow?.cancel();
+      authFlow = null;
+      const pendingClient = authenticated ? null : client;
+      if (pendingClient) client = null;
+      if (pendingClient) await withTimeout(pendingClient.disconnect(), 5000).catch(() => {});
+      return json(response, 200, status());
     }
     if (url.pathname === '/auth/logout' && request.method === 'POST') {
       await logout();

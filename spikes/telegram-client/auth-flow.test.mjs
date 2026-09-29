@@ -45,3 +45,23 @@ test('stops retrying non-recoverable Telegram login errors', async () => {
   assert.equal(flow.state().step, 'phone');
   assert.match(flow.state().error, /wait/);
 });
+
+test('reports a session save failure after Telegram authorization without exposing credentials', async () => {
+  const client = {async start(callbacks) {
+    assert.equal(await callbacks.phoneNumber(), '+15555550123');
+    assert.equal(await callbacks.phoneCode(), '12345');
+  }};
+  const flow = createAuthFlow(client, async () => {
+    const error = new Error('spawn EPERM');
+    error.code = 'EPERM';
+    throw error;
+  });
+  const done = flow.begin('+15555550123');
+  await Promise.resolve();
+  flow.submit('code', '12345');
+  await done;
+  assert.equal(flow.state().step, 'phone');
+  assert.match(flow.state().error, /could not save your session/i);
+  assert.equal(flow.state().diagnostic, 'EPERM');
+  assert.equal(JSON.stringify(flow.state()).includes('12345'), false);
+});
