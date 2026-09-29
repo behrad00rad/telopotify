@@ -253,10 +253,10 @@ function renderPlayer() {
   const t = currentTrack();
   const playing = t && !audio.paused;
   $('#player').dataset.action = t ? 'now' : '';
-  $('#player').innerHTML = `<div class="player-track${t ? ' open-now' : ''}" ${t ? 'data-action="now" role="button" tabindex="0" aria-label="Open Now Playing"' : ''}>${art(t, 51)}<div class="track-copy"><span class="title-button">${esc(t ? titleOf(t) : 'Nothing playing')}</span>${t ? artistButton(t) : '<p>Choose a song to start listening</p>'}</div>${t ? button('like', liked(state.currentId) ? 'Unlike' : 'Like', 'heart', liked(state.currentId) ? 'liked' : '') : ''}</div>
+  $('#player').innerHTML = `<div class="player-track${t ? ' open-now' : ''}" ${t ? 'data-action="now" role="button" tabindex="0" aria-label="Open Now Playing"' : ''}>${art(t, 51)}<div class="track-copy"><span class="title-button">${esc(t ? titleOf(t) : 'Nothing playing')}</span>${t ? artistButton(t) : '<p>Choose a song to start listening</p>'}</div>${t ? button('like', liked(state.currentId) ? 'Unlike' : 'Like', 'heart', `desktop-like${liked(state.currentId) ? ' liked' : ''}`) : ''}</div>
     <div class="player-center"><div class="player-controls">${button('shuffle', state.shuffle ? 'Turn shuffle off' : 'Turn shuffle on', 'shuffle', state.shuffle ? 'mode-active' : '')}${button('prev', 'Previous song', 'prev')}<button class="play-round" data-action="toggle" aria-label="${playing ? 'Pause' : 'Play'}">${icon(playing ? 'pause' : 'play')}</button>${button('next', 'Next song', 'next')}${button('repeat', `Repeat: ${state.repeat}`, 'repeat', state.repeat === 'one' ? 'mode-active repeat-one-mode' : state.repeat === 'all' ? 'mode-active' : '')}</div>
     <div class="progress-row"><span class="current-time">${duration(audio.currentTime)}</span><input class="seek" type="range" min="0" max="1000" value="${Math.round((audio.currentTime / (audio.duration || 1)) * 1000) || 0}" aria-label="Song progress"><span class="total-time">${duration(audio.duration || t?.durationSeconds)}</span></div></div>
-    <div class="player-right">${icon('volume')}<input id="volume" type="range" min="0" max="1" step="0.01" value="${audio.volume}" aria-label="Volume">${button('queue', 'Open queue', 'queue', 'queue-toggle')}</div>`;
+    <div class="player-right">${icon('volume')}<input id="volume" type="range" min="0" max="1" step="0.01" value="${audio.volume}" aria-label="Volume">${t ? button('like', liked(state.currentId) ? 'Unlike' : 'Like', 'heart', `mobile-like${liked(state.currentId) ? ' liked' : ''}`) : ''}${button('queue', 'Open queue', 'queue', 'queue-toggle')}</div>`;
 }
 function renderModal() {
   const root = $('#modal-root');
@@ -294,9 +294,13 @@ function renderDrawer() {
   root.querySelector('.queue-scroll').scrollTop = previousScroll;
 }
 function render() {
+  const channelSelection = Boolean(state.multiuser && state.webAuthenticated && state.status?.authenticated && !state.status?.selected);
+  const enteringChannels = channelSelection && !$('#app').classList.contains('channel-selection');
   $('#app').classList.toggle('onboarding', state.multiuser && (!state.webAuthenticated || !state.status?.authenticated || !state.status?.selected));
+  $('#app').classList.toggle('channel-selection', channelSelection);
   nav(); renderNotice(); renderStatus();
   $('#content').innerHTML = content();
+  if (enteringChannels) $('#content').scrollTop = 0;
   renderPlayer(); renderModal(); renderDrawer();
   document.querySelectorAll('.art img').forEach(img => { if (img.complete && !img.naturalWidth) img.remove(); });
 }
