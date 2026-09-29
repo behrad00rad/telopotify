@@ -9,7 +9,8 @@
     "icons:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-windows-icons.ps1",
     "spike:telegram": "node spikes/telegram-client/probe.mjs",
     "dev:library": "node spikes/telegram-client/library-server.mjs",
-    "web:gateway": "node web/gateway.mjs"
+    "web:gateway": "node web/gateway.mjs",
+    "web:accounts": "node web/multiuser.mjs"
   },
   "dependencies": {
     "teleproto": "1.229.0"

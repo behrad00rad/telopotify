@@ -1,7 +1,34 @@
 import { spawn } from 'node:child_process';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 
 const PREFIX = 'dpapi:v1:';
+const SERVER_PREFIX = 'aesgcm:v1:';
+
+function serverKey() {
+  const configured = process.env.TELOPOTIFY_SESSION_KEY;
+  if (!configured) return null;
+  const key = Buffer.from(configured, 'base64');
+  if (key.length !== 32 || key.toString('base64') !== configured) {
+    throw new Error('TELOPOTIFY_SESSION_KEY must be a base64-encoded 32-byte key');
+  }
+  return key;
+}
+
+export function encryptServerSession(session, key) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const bytes = Buffer.concat([cipher.update(session, 'utf8'), cipher.final()]);
+  return SERVER_PREFIX + Buffer.concat([iv, cipher.getAuthTag(), bytes]).toString('base64');
+}
+
+export function decryptServerSession(stored, key) {
+  const bytes = Buffer.from(stored.slice(SERVER_PREFIX.length), 'base64');
+  if (bytes.length < 29) throw new Error('Saved Telegram session is invalid');
+  const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(0, 12));
+  decipher.setAuthTag(bytes.subarray(12, 28));
+  return Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8');
+}
 
 function protectWithWindows(mode, value) {
   if (process.platform !== 'win32') {
@@ -33,10 +60,12 @@ function protectWithWindows(mode, value) {
 
 export async function saveSession(path, session) {
   if (typeof session !== 'string' || !session.trim()) throw new Error('Telegram session is empty');
-  const encrypted = await protectWithWindows('protect', session.trim());
+  const key = serverKey();
+  const encrypted = key ? encryptServerSession(session.trim(), key) :
+    PREFIX + await protectWithWindows('protect', session.trim());
   const tempPath = `${path}.${process.pid}.tmp`;
   try {
-    await writeFile(tempPath, PREFIX + encrypted, { encoding: 'utf8', mode: 0o600 });
+    await writeFile(tempPath, encrypted, { encoding: 'utf8', mode: 0o600 });
     await rename(tempPath, path);
   } finally {
     await unlink(tempPath).catch(error => { if (error.code !== 'ENOENT') throw error; });
@@ -48,6 +77,11 @@ export async function readSession(path) {
   try { stored = (await readFile(path, 'utf8')).trim(); }
   catch (error) { if (error.code === 'ENOENT') return ''; throw error; }
   if (!stored) return '';
+  if (stored.startsWith(SERVER_PREFIX)) {
+    const key = serverKey();
+    if (!key) throw new Error('TELOPOTIFY_SESSION_KEY is required to restore this Telegram session');
+    return decryptServerSession(stored, key);
+  }
   if (stored.startsWith(PREFIX)) {
     return protectWithWindows('unprotect', stored.slice(PREFIX.length));
   }

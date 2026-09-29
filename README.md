@@ -23,7 +23,7 @@ React Native Windows needs PowerShell 7 (`pwsh.exe`). The launcher finds the sta
 Start the Telegram service with `npm run dev:library`, then open
 `http://127.0.0.1:43127/web` on the same PC. The browser player has Home,
 Songs, Artists, Albums, Liked, Playlists, search, artwork, and a Now Playing
-view. It uses the saved local Telegram session and streams audio by range;
+view. The browser also has a bottom queue drawer, shuffle, and repeat. It uses the saved local Telegram session and streams audio by range;
 opening the page does not download the whole channel. The browser and Windows
 app share the channel, likes, and playlists stored by the local service.
 
@@ -43,6 +43,28 @@ sharing password before it exposes music metadata or audio. Keep port `43127`
 private; it is the local Windows-app service. Everyone with the sharing password
 uses the same channel, likes, and playlists. Closing the PC or the service
 stops remote streaming. The iPhone native app remains independent of the PC.
+
+### Separate web accounts (development)
+
+Run `npm run web:accounts` and open `http://127.0.0.1:43129/web`. Each person
+creates a web account, then signs in to their own Telegram account and chooses
+their own channel. Accounts have separate Telegram sessions, catalogs, artwork,
+likes, and playlists in ignored `local-data/web-accounts/`. The server listens
+on localhost; use an HTTPS tunnel or reverse proxy to reach it from other devices.
+Do not expose the local bridge ports. Use persistent storage for
+`local-data/web-accounts/` on a hosted server.
+
+The included Telegram Desktop API credentials remain **test-only**. Before
+releasing a public service, set `TELOPOTIFY_API_ID` and `TELOPOTIFY_API_HASH`
+to your own app credentials. On Windows, Telegram sessions are encrypted with
+DPAPI by default. On Linux or other hosted systems, set a stable
+`TELOPOTIFY_SESSION_KEY` to a base64-encoded 32-byte secret before starting the
+server; preserve that key securely or saved Telegram sessions cannot be
+restored. Web account passwords are stored as salted scrypt hashes. Web login
+cookies last seven days but become invalid when the server restarts, so users log
+back into their web accounts; their saved Telegram sessions remain. This is a
+development implementation for a small trusted group, not a production-ready
+public sign-up service.
 
 ## Current experiment
 

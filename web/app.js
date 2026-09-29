@@ -5,9 +5,9 @@ const navItems = [
   ['Albums', 'albums'], ['Liked', 'heart'], ['Playlists', 'playlists'],
 ];
 const state = {
-  token: '', remote: false, webAuthenticated: true, status: null, tracks: [], channel: '', channelId: null, revision: -1,
+  token: '', remote: false, multiuser: false, accountMode: 'login', webAuthenticated: true, status: null, tracks: [], channel: '', channelId: null, revision: -1,
   channels: [], channelsFetched: false, collections: null, page: 'Home', query: '',
-  group: null, currentId: null, playQueue: [], modal: null, limit: 100,
+  group: null, currentId: null, playQueue: [], queueSource: [], shuffle: false, repeat: 'off', modal: null, drawer: false, queueLimit: 50, limit: 100,
   loadingLibrary: false, busy: false, notice: '',
 };
 let saveTail = Promise.resolve();
@@ -52,6 +52,14 @@ function errorMessage(error) {
   state.notice = error?.message || String(error);
   renderNotice();
 }
+function clearWebSession() {
+  audio.pause(); audio.removeAttribute('src'); audio.load();
+  state.webAuthenticated = false; state.status = null;
+  state.tracks = []; state.collections = null; state.channels = [];
+  state.channel = ''; state.channelId = null; state.revision = -1;
+  state.currentId = null; state.playQueue = []; state.queueSource = [];
+  state.modal = null; state.drawer = false;
+}
 function renderNotice() {
   const notice = $('#notice');
   notice.hidden = !state.notice;
@@ -82,7 +90,7 @@ async function loadLibrary() {
     if (changed || !state.collections) {
       const saved = await api('/collections');
       state.collections = {channelId: state.channelId, ...saved};
-      if (changed) { audio.pause(); audio.removeAttribute('src'); state.currentId = null; state.playQueue = []; }
+      if (changed) { audio.pause(); audio.removeAttribute('src'); state.currentId = null; state.playQueue = []; state.queueSource = []; state.drawer = false; }
     }
     render();
   } finally { state.loadingLibrary = false; }
@@ -105,8 +113,7 @@ async function refreshStatus(force = false) {
     }
   } catch (error) {
     if (state.remote && error.status === 401) {
-      state.webAuthenticated = false; state.status = null;
-      audio.pause(); render();
+      clearWebSession(); render();
     } else errorMessage(error);
   }
 }
@@ -119,11 +126,14 @@ function nav() {
 function heading(kicker, title, subtitle = '', action = '') {
   return `<div class="page-heading"><div><div class="eyebrow">${esc(kicker)}</div><h1 class="page-title">${esc(title)}</h1><p class="page-subtitle">${esc(subtitle)}</p></div>${action}</div>`;
 }
+function artistButton(t, className = 'artist-link') {
+  return `<button class="${className}" data-action="artist" data-name="${esc(artistOf(t))}">${esc(artistOf(t))}</button>`;
+}
 function trackRow(t, index) {
   const id = idOf(t);
-  return `<div class="track-row${state.currentId === id ? ' active' : ''}">
+  return `<div class="track-row${state.currentId === id ? ' active' : ''}" data-action="play" data-id="${id}" role="button" tabindex="0" aria-label="Play ${esc(titleOf(t))}">
     <span class="track-number">${index + 1}</span>${art(t)}
-    <div class="track-copy"><button class="track-title" data-action="play" data-id="${id}">${esc(titleOf(t))}</button><div class="track-artist">${esc(artistOf(t))}</div></div>
+    <div class="track-copy"><span class="track-title">${esc(titleOf(t))}</span>${artistButton(t, 'track-artist artist-link')}</div>
     <span class="track-album">${esc(albumOf(t))}</span>
     ${button('like', liked(id) ? 'Unlike' : 'Like', 'heart', liked(id) ? 'liked' : '').replace('data-action="like"', `data-action="like" data-id="${id}"`)}
     ${button('add', 'Add to playlist', 'plus').replace('data-action="add"', `data-action="add" data-id="${id}"`)}
@@ -194,6 +204,10 @@ function content() {
   return playlistPage();
 }
 function webLogin() {
+  if (state.multiuser) return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">YOUR MUSIC, YOUR ACCOUNT</div>
+    <h1>${state.accountMode === 'register' ? 'Create your account.' : 'Welcome back.'}</h1><p>${state.accountMode === 'register' ? 'Create a private web account, then connect your own Telegram account and choose your music channel.' : 'Sign in to your web account to reach your Telegram library.'}</p>
+    <form id="web-account-form"><input id="web-username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_]+" placeholder="Username" aria-label="Username" autocomplete="username" required><input id="web-password" type="password" minlength="12" placeholder="Password" aria-label="Password" autocomplete="${state.accountMode === 'register' ? 'new-password' : 'current-password'}" required><button class="pill" type="submit">${state.accountMode === 'register' ? 'Create account' : 'Sign in'}</button></form>
+    <button class="text-link account-switch" data-action="account-mode">${state.accountMode === 'register' ? 'Already have an account? Sign in' : 'New here? Create an account'}</button></div>`;
   return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">PRIVATE WEB PLAYER</div>
     <h1>Your music, anywhere.</h1><p>Enter the sharing password set on the Windows computer hosting Telopotify.</p>
     <form id="web-login-form"><input id="web-password" type="password" placeholder="Sharing password" aria-label="Sharing password" autocomplete="current-password" required><button class="pill" type="submit">Unlock</button></form></div>`;
@@ -203,7 +217,7 @@ function setup() {
   const prompt = {phone: 'Phone number with country code', code: 'Telegram login code',
     password: 'Two-step password', email: 'Email address', emailCode: 'Email verification code'}[step];
   return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">WELCOME TO TELOPOTIFY</div>
-    <h1>Your music starts here.</h1><p>${state.remote ? 'Sign in through the private Telopotify service on the Windows PC.' : 'Sign in to Telegram on this computer.'} Your session stays on that computer and songs stream as needed.</p>
+    <h1>Your music starts here.</h1><p>${state.multiuser ? 'Sign in to your Telegram account. This session and its music library belong only to your web account.' : state.remote ? 'Sign in through the private Telopotify service on the Windows PC.' : 'Sign in to Telegram on this computer.'} Songs stream as needed.</p>
     ${prompt ? `<form id="auth-form"><input id="auth-value" ${step === 'password' ? 'type="password"' : 'type="text"'} placeholder="${prompt}" aria-label="${prompt}" autocomplete="off" required><button class="pill" type="submit">Continue</button></form>` : `<p>Connecting to Telegram…</p><button class="pill dark" data-action="reconnect">Retry connection</button>`}
     ${state.status.error ? `<p class="setup-error">${esc(state.status.error)}</p>` : ''}</div>`;
 }
@@ -217,10 +231,11 @@ function channelsPage() {
 function renderPlayer() {
   const t = currentTrack();
   const playing = t && !audio.paused;
-  $('#player').innerHTML = `<div class="player-track">${art(t, 51)}<div class="track-copy"><button class="title-button" data-action="now">${esc(t ? titleOf(t) : 'Nothing playing')}</button><p>${esc(t ? artistOf(t) : 'Choose a song to start listening')}</p></div>${t ? button('like', liked(state.currentId) ? 'Unlike' : 'Like', 'heart', liked(state.currentId) ? 'liked' : '') : ''}</div>
-    <div class="player-center"><div class="player-controls">${button('prev', 'Previous song', 'prev')}<button class="play-round" data-action="toggle" aria-label="${playing ? 'Pause' : 'Play'}">${icon(playing ? 'pause' : 'play')}</button>${button('next', 'Next song', 'next')}</div>
+  $('#player').dataset.action = t ? 'now' : '';
+  $('#player').innerHTML = `<div class="player-track${t ? ' open-now' : ''}" ${t ? 'data-action="now" role="button" tabindex="0" aria-label="Open Now Playing"' : ''}>${art(t, 51)}<div class="track-copy"><span class="title-button">${esc(t ? titleOf(t) : 'Nothing playing')}</span>${t ? artistButton(t) : '<p>Choose a song to start listening</p>'}</div>${t ? button('like', liked(state.currentId) ? 'Unlike' : 'Like', 'heart', liked(state.currentId) ? 'liked' : '') : ''}</div>
+    <div class="player-center"><div class="player-controls">${button('shuffle', state.shuffle ? 'Turn shuffle off' : 'Turn shuffle on', 'shuffle', state.shuffle ? 'mode-active' : '')}${button('prev', 'Previous song', 'prev')}<button class="play-round" data-action="toggle" aria-label="${playing ? 'Pause' : 'Play'}">${icon(playing ? 'pause' : 'play')}</button>${button('next', 'Next song', 'next')}${button('repeat', `Repeat: ${state.repeat}`, 'repeat', state.repeat === 'one' ? 'mode-active repeat-one-mode' : state.repeat === 'all' ? 'mode-active' : '')}</div>
     <div class="progress-row"><span class="current-time">${duration(audio.currentTime)}</span><input class="seek" type="range" min="0" max="1000" value="${Math.round((audio.currentTime / (audio.duration || 1)) * 1000) || 0}" aria-label="Song progress"><span class="total-time">${duration(audio.duration || t?.durationSeconds)}</span></div></div>
-    <div class="player-right">${icon('volume')}<input id="volume" type="range" min="0" max="1" step="0.01" value="${audio.volume}" aria-label="Volume"></div>`;
+    <div class="player-right">${icon('volume')}<input id="volume" type="range" min="0" max="1" step="0.01" value="${audio.volume}" aria-label="Volume">${button('queue', 'Open queue', 'queue', 'queue-toggle')}</div>`;
 }
 function renderModal() {
   const root = $('#modal-root');
@@ -235,16 +250,33 @@ function renderModal() {
   }
   const t = currentTrack();
   root.innerHTML = `<div class="modal-backdrop" data-action="close"><div class="dialog now-modal" role="dialog" aria-modal="true" aria-label="Now playing">
-    ${button('close', 'Close', 'close', 'close')}<div class="eyebrow">NOW PLAYING</div>${art(t, 300)}<h2>${esc(t ? titleOf(t) : 'Nothing playing')}</h2><p>${esc(t ? artistOf(t) : 'Choose a song')}</p>
+    ${button('close', 'Close', 'close', 'close')}<div class="eyebrow">NOW PLAYING</div>${art(t, 300)}<h2>${esc(t ? titleOf(t) : 'Nothing playing')}</h2>${t ? artistButton(t, 'modal-artist artist-link') : '<p>Choose a song</p>'}
     <div class="player-center"><div class="progress-row"><span class="current-time">${duration(audio.currentTime)}</span><input class="seek" type="range" min="0" max="1000" value="0" aria-label="Song progress"><span class="total-time">${duration(audio.duration || t?.durationSeconds)}</span></div>
-    <div class="player-controls">${button('prev', 'Previous song', 'prev')}<button class="play-round" data-action="toggle" aria-label="${audio.paused ? 'Play' : 'Pause'}">${icon(audio.paused ? 'play' : 'pause')}</button>${button('next', 'Next song', 'next')}</div></div>
-    <div class="now-actions">${t ? button('like', liked(state.currentId) ? 'Unlike' : 'Like', 'heart', liked(state.currentId) ? 'liked' : '') : ''}<span class="eyebrow">${esc(state.channel)}</span>${t ? button('add', 'Add to playlist', 'plus').replace('data-action="add"', `data-action="add" data-id="${state.currentId}"`) : ''}</div></div></div>`;
+    <div class="player-controls">${button('shuffle', state.shuffle ? 'Turn shuffle off' : 'Turn shuffle on', 'shuffle', state.shuffle ? 'mode-active' : '')}${button('prev', 'Previous song', 'prev')}<button class="play-round" data-action="toggle" aria-label="${audio.paused ? 'Play' : 'Pause'}">${icon(audio.paused ? 'play' : 'pause')}</button>${button('next', 'Next song', 'next')}${button('repeat', `Repeat: ${state.repeat}`, 'repeat', state.repeat === 'one' ? 'mode-active repeat-one-mode' : state.repeat === 'all' ? 'mode-active' : '')}</div></div>
+    <div class="now-actions">${t ? button('like', liked(state.currentId) ? 'Unlike' : 'Like', 'heart', liked(state.currentId) ? 'liked' : '') : ''}<span class="eyebrow">${esc(state.channel)}</span>${t ? button('add', 'Add to playlist', 'plus').replace('data-action="add"', `data-action="add" data-id="${state.currentId}"`) : ''}${button('queue', 'Open queue', 'queue')}</div></div></div>`;
   updateTime();
 }
+function renderDrawer() {
+  const root = $('#drawer-root');
+  if (!state.drawer) { root.innerHTML = ''; return; }
+  const previousScroll = root.querySelector('.queue-scroll')?.scrollTop || 0;
+  const trackById = new Map(state.tracks.map(t => [idOf(t), t]));
+  const ids = state.playQueue.filter(id => trackById.has(id));
+  const current = ids.indexOf(state.currentId);
+  const upcoming = current >= 0 ? ids.slice(current + 1) : ids;
+  const row = (id, index) => {
+    const t = trackById.get(id);
+    return `<div class="queue-row${id === state.currentId ? ' active' : ''}" data-action="queue-play" data-id="${esc(id)}" role="button" tabindex="0" aria-label="Play ${esc(titleOf(t))}">${art(t, 48)}<div class="track-copy"><strong>${esc(titleOf(t))}</strong>${artistButton(t)}</div><span class="queue-number">${index ? index : 'Playing'}</span></div>`;
+  };
+  const shown = upcoming.slice(0, state.queueLimit);
+  root.innerHTML = `<div class="drawer-backdrop" data-action="queue-close"><section class="queue-drawer" role="dialog" aria-modal="true" aria-label="Play queue"><div class="drawer-handle"></div><header><div><div class="eyebrow">PLAYBACK</div><h2>Queue</h2></div>${button('queue-close', 'Close queue', 'close')}</header><div class="queue-scroll">${state.currentId ? `<h3>Now playing</h3>${row(state.currentId, 0)}` : ''}<h3>Up next · ${upcoming.length}</h3>${shown.length ? shown.map((id, index) => row(id, index + 1)).join('') : '<p class="queue-empty">No songs queued. Choose a song to begin.</p>'}${shown.length < upcoming.length ? `<button class="pill dark queue-more" data-action="queue-more">Show more · ${upcoming.length - shown.length} remaining</button>` : ''}</div></section></div>`;
+  root.querySelector('.queue-scroll').scrollTop = previousScroll;
+}
 function render() {
+  $('#app').classList.toggle('onboarding', state.multiuser && (!state.webAuthenticated || !state.status?.authenticated || !state.status?.selected));
   nav(); renderNotice(); renderStatus();
   $('#content').innerHTML = content();
-  renderPlayer(); renderModal();
+  renderPlayer(); renderModal(); renderDrawer();
   document.querySelectorAll('.art img').forEach(img => { if (img.complete && !img.naturalWidth) img.remove(); });
 }
 function updateTime() {
@@ -259,22 +291,38 @@ function queueForView() {
   if (state.page === 'Liked') return state.tracks.filter(t => liked(idOf(t)));
   return filterTracks(state.tracks);
 }
+function shuffled(ids) {
+  const result = [...ids];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
 async function playTrack(t, queue = queueForView()) {
   if (!t) return;
   state.currentId = idOf(t);
-  state.playQueue = queue.map(idOf);
+  state.queueSource = queue.map(idOf);
+  state.playQueue = state.shuffle ? [state.currentId, ...shuffled(state.queueSource.filter(id => id !== state.currentId))] : [...state.queueSource];
   audio.src = urlFor(`/audio/${t.messageId}`);
   audio.load();
-  renderPlayer(); renderModal();
-  try { await audio.play(); state.notice = ''; renderNotice(); renderPlayer(); renderModal(); }
+  renderPlayer(); renderModal(); renderDrawer();
+  try { await audio.play(); state.notice = ''; renderNotice(); renderPlayer(); renderModal(); renderDrawer(); }
   catch (error) { errorMessage(error); }
 }
-function step(direction) {
+function step(direction, ended = false) {
+  if (ended && state.repeat === 'one') { audio.currentTime = 0; audio.play().catch(errorMessage); return; }
   const index = state.playQueue.indexOf(state.currentId);
-  if (direction < 0 && audio.currentTime > 3) { audio.currentTime = 0; return; }
-  const next = state.playQueue[index + direction];
-  if (next) playTrack(state.tracks.find(t => idOf(t) === next), state.playQueue.map(id => state.tracks.find(t => idOf(t) === id)).filter(Boolean));
-  else if (direction > 0) { audio.pause(); renderPlayer(); renderModal(); }
+  if (!ended && direction < 0 && audio.currentTime > 3) { audio.currentTime = 0; return; }
+  const next = state.playQueue[index + direction] || (state.repeat === 'all' ? state.playQueue[direction > 0 ? 0 : state.playQueue.length - 1] : null);
+  if (next) {
+    state.currentId = next;
+    const t = currentTrack();
+    if (!t) return;
+    audio.src = urlFor(`/audio/${t.messageId}`); audio.load();
+    renderPlayer(); renderModal(); renderDrawer();
+    audio.play().catch(errorMessage);
+  } else if (direction > 0) { audio.pause(); renderPlayer(); renderModal(); renderDrawer(); }
 }
 function saveCollections(next) {
   state.collections = {...next, channelId: state.channelId};
@@ -298,12 +346,30 @@ function createPlaylist(name) {
 async function onAction(buttonEl) {
   const action = buttonEl.dataset.action;
   if (action === 'close') { state.modal = null; renderModal(); return; }
+  if (action === 'queue-close') { state.drawer = false; renderDrawer(); return; }
+  if (action === 'queue') { state.queueLimit = 50; state.drawer = true; renderDrawer(); return; }
+  if (action === 'queue-more') { state.queueLimit += 50; renderDrawer(); return; }
+  if (action === 'queue-play') {
+    const t = state.tracks.find(song => idOf(song) === buttonEl.dataset.id);
+    if (!t) return;
+    state.currentId = idOf(t);
+    audio.src = urlFor(`/audio/${t.messageId}`); audio.load();
+    renderPlayer(); renderModal(); renderDrawer();
+    await audio.play().catch(errorMessage); return;
+  }
   if (action === 'web-logout') {
     await api('/web/logout', {});
-    state.webAuthenticated = false; state.status = null; audio.pause();
-    state.modal = null; render(); return;
+    clearWebSession(); render(); return;
   }
+  if (action === 'account-mode') { state.accountMode = state.accountMode === 'login' ? 'register' : 'login'; state.notice = ''; render(); return; }
   if (action === 'page') { state.page = buttonEl.dataset.page; state.group = null; state.limit = 100; render(); $('#content').scrollTop = 0; return; }
+  if (action === 'artist') {
+    const name = buttonEl.dataset.name;
+    state.page = 'Artists'; state.query = ''; $('#search').value = '';
+    state.group = {kind: 'Artists', name, tracks: state.tracks.filter(t => artistOf(t) === name)};
+    state.modal = null; state.drawer = false; state.limit = 100;
+    render(); $('#content').scrollTop = 0; return;
+  }
   if (action === 'more') { state.limit += 100; render(); return; }
   if (action === 'back') { state.group = null; render(); return; }
   if (action === 'group') {
@@ -326,6 +392,19 @@ async function onAction(buttonEl) {
   }
   if (action === 'next') return step(1);
   if (action === 'prev') return step(-1);
+  if (action === 'shuffle') {
+    state.shuffle = !state.shuffle;
+    const index = state.playQueue.indexOf(state.currentId);
+    const played = index >= 0 ? state.playQueue.slice(0, index + 1) : [];
+    const remaining = state.queueSource.filter(id => !played.includes(id));
+    state.playQueue = state.shuffle ? [...played, ...shuffled(remaining)] :
+      [...played, ...remaining];
+    renderPlayer(); renderModal(); renderDrawer(); return;
+  }
+  if (action === 'repeat') {
+    state.repeat = {off: 'all', all: 'one', one: 'off'}[state.repeat];
+    renderPlayer(); renderModal(); return;
+  }
   if (action === 'now') { if (state.currentId) { state.modal = {type: 'now'}; renderModal(); } return; }
   if (action === 'like') {
     const id = buttonEl.dataset.id || state.currentId;
@@ -358,9 +437,21 @@ async function onAction(buttonEl) {
 document.addEventListener('click', event => {
   const target = event.target.closest('[data-action]');
   if (!target) return;
-  if (target.classList.contains('modal-backdrop') && event.target !== target) return;
+  if (target.id === 'player' && event.target.closest('input,button')) return;
+  if ((target.classList.contains('modal-backdrop') || target.classList.contains('drawer-backdrop')) && event.target !== target) return;
   event.preventDefault();
   Promise.resolve(onAction(target)).catch(errorMessage);
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    if (state.drawer) { state.drawer = false; renderDrawer(); }
+    else if (state.modal) { state.modal = null; renderModal(); }
+    return;
+  }
+  if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('[role="button"][data-action]')) {
+    event.preventDefault();
+    Promise.resolve(onAction(event.target)).catch(errorMessage);
+  }
 });
 document.addEventListener('submit', event => {
   event.preventDefault();
@@ -376,6 +467,17 @@ document.addEventListener('submit', event => {
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not unlock the player');
       state.webAuthenticated = true;
+      await refreshStatus(true);
+    }).catch(errorMessage);
+  }
+  if (event.target.id === 'web-account-form') {
+    fetch(state.accountMode === 'register' ? '/web/register' : '/web/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: $('#web-username').value, password: $('#web-password').value}),
+    }).then(async response => {
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not sign in');
+      state.webAuthenticated = true; state.notice = '';
       await refreshStatus(true);
     }).catch(errorMessage);
   }
@@ -400,14 +502,16 @@ audio.addEventListener('timeupdate', updateTime);
 audio.addEventListener('durationchange', updateTime);
 audio.addEventListener('play', () => { renderPlayer(); if (state.modal?.type === 'now') renderModal(); });
 audio.addEventListener('pause', () => { renderPlayer(); if (state.modal?.type === 'now') renderModal(); });
-audio.addEventListener('ended', () => step(1));
+audio.addEventListener('ended', () => step(1, true));
 audio.addEventListener('error', () => { if (state.currentId) errorMessage(new Error('Playback stopped. Check Telegram or the VPN, then press play to retry.')); });
 async function start() {
   try {
     const session = await fetch('/web/session');
     if (session.ok) {
       state.remote = true;
-      state.webAuthenticated = Boolean((await session.json()).authenticated);
+      const details = await session.json();
+      state.multiuser = Boolean(details.multiuser);
+      state.webAuthenticated = Boolean(details.authenticated);
       if (state.webAuthenticated) await refreshStatus(true); else render();
     } else {
       const bootstrap = await (await fetch('/bootstrap')).json();

@@ -17,9 +17,9 @@ import { readSession, removeSession, saveSession } from './session-store.mjs';
 import { restoreDelay, shouldRetryRestore } from './restore-policy.mjs';
 
 // Public test-only credentials from Telegram Desktop. Never ship these in an app.
-const API_ID = 17349;
-const API_HASH = '344583e45741c457fe1862106095a5eb';
-const DATA_DIR = resolve('local-data');
+const API_ID = Number(process.env.TELOPOTIFY_API_ID || 17349);
+const API_HASH = process.env.TELOPOTIFY_API_HASH || '344583e45741c457fe1862106095a5eb';
+const DATA_DIR = resolve(process.env.TELOPOTIFY_DATA_DIR || 'local-data');
 const SESSION_PATH = resolve(DATA_DIR, 'telegram.session');
 const CONNECTION_PATH = resolve(DATA_DIR, 'bridge-connection.json');
 const LIBRARY_CACHE_PATH = resolve(DATA_DIR, 'bridge-library.json');
@@ -36,7 +36,7 @@ const WEB_FILES = new Map([
 const MAX_MESSAGES = 2000;
 const SYNC_BATCH = 100;
 const SYNC_INTERVAL_MS = 60_000;
-const BRIDGE_PORT = 43127;
+const BRIDGE_PORT = Number(process.env.TELOPOTIFY_BRIDGE_PORT ?? 43127);
 const token = randomBytes(24).toString('hex');
 const audioCache = new AudioRangeCache(cacheLimitFromEnv(process.env.TELOPOTIFY_CACHE_MB));
 const collectionsStore = new CollectionsStore(COLLECTIONS_PATH);
@@ -629,7 +629,7 @@ async function main() {
   });
   const address = `http://127.0.0.1:${server.address().port}?token=${token}`;
   await writeFile(CONNECTION_PATH, JSON.stringify({ address }), { encoding: 'utf8', mode: 0o600 });
-  console.log(`Local bridge ready at http://127.0.0.1:${BRIDGE_PORT}. The app connects automatically.`);
+  console.log(`Local bridge ready at http://127.0.0.1:${server.address().port}. The app connects automatically.`);
   console.log('Keep this terminal running. Ctrl+C stops the bridge.');
   restoreSession().catch(() => { initializing = false; console.warn('Could not restore Telegram session.'); });
   const syncTimer = setInterval(() => {
