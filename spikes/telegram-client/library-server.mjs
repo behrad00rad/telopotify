@@ -26,6 +26,13 @@ const LIBRARY_CACHE_PATH = resolve(DATA_DIR, 'bridge-library.json');
 const COLLECTIONS_PATH = resolve(DATA_DIR, 'collections.json');
 const OFFLINE_DIR = resolve(DATA_DIR, 'offline');
 const ARTWORK_DIR = resolve(DATA_DIR, 'artwork');
+const WEB_FILES = new Map([
+  ['/web', [resolve('web/index.html'), 'text/html; charset=utf-8']],
+  ['/web/', [resolve('web/index.html'), 'text/html; charset=utf-8']],
+  ['/web/app.js', [resolve('web/app.js'), 'text/javascript; charset=utf-8']],
+  ['/web/styles.css', [resolve('web/styles.css'), 'text/css; charset=utf-8']],
+  ['/web/logo.png', [resolve('TelopotifyApp/assets/telopotify-logo.png'), 'image/png']],
+]);
 const MAX_MESSAGES = 2000;
 const SYNC_BATCH = 100;
 const SYNC_INTERVAL_MS = 60_000;
@@ -377,6 +384,14 @@ async function logout() {
 async function handle(request, response) {
   try {
     const url = new URL(request.url, 'http://127.0.0.1');
+    const asset = WEB_FILES.get(url.pathname);
+    if (asset && request.method === 'GET') {
+      const bytes = await readFile(asset[0]);
+      response.writeHead(200, { 'Content-Type': asset[1], 'Content-Length': bytes.length,
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; media-src 'self'; script-src 'self'; style-src 'self'" });
+      return response.end(bytes);
+    }
     // The app discovers the current token on this loopback-only port. Browsers
     // cannot read it cross-origin because the bridge sends no CORS headers.
     if (url.pathname === '/bootstrap' && request.method === 'GET') {

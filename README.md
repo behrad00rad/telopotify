@@ -18,6 +18,32 @@ The launcher starts the local Telegram bridge and React Native development serve
 
 React Native Windows needs PowerShell 7 (`pwsh.exe`). The launcher finds the standard installation or the copy bundled with Codex on this PC and adds it to its own process PATH. It reports a clear error if neither is available.
 
+## Responsive web player
+
+Start the Telegram service with `npm run dev:library`, then open
+`http://127.0.0.1:43127/web` on the same PC. The browser player has Home,
+Songs, Artists, Albums, Liked, Playlists, search, artwork, and a Now Playing
+view. It uses the saved local Telegram session and streams audio by range;
+opening the page does not download the whole channel. The browser and Windows
+app share the channel, likes, and playlists stored by the local service.
+
+To use it from other devices, keep the Windows PC and Telegram service running.
+Set a strong sharing password and start the separate gateway:
+
+```powershell
+$env:TELOPOTIFY_WEB_PASSWORD = 'your-long-unique-password'
+npm run web:gateway
+```
+
+The gateway listens only on `127.0.0.1:43128`. Publish **that port only**
+through an HTTPS tunnel, such as [Tailscale Funnel](https://tailscale.com/docs/reference/tailscale-cli/funnel)
+(`tailscale funnel 43128`),
+and open the tunnel's `/web` URL on the other device. The gateway asks for the
+sharing password before it exposes music metadata or audio. Keep port `43127`
+private; it is the local Windows-app service. Everyone with the sharing password
+uses the same channel, likes, and playlists. Closing the PC or the service
+stops remote streaming. The iPhone native app remains independent of the PC.
+
 ## Current experiment
 
 The local byte-range playback experiment uses only Node.js:
