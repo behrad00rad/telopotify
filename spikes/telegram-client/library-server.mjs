@@ -81,7 +81,11 @@ async function withTimeout(promise, milliseconds) {
 }
 
 function newClient(session = '') {
-  return new TelegramClient(new StringSession(session), API_ID, API_HASH, { connectionRetries: 3 });
+  const proxyPort = Number(process.env.TELOPOTIFY_SOCKS_PORT);
+  const proxy = Number.isInteger(proxyPort) && proxyPort > 0 && proxyPort < 65536 ?
+    {socksType: 5, ip: '127.0.0.1', port: proxyPort, timeout: 15} : undefined;
+  return new TelegramClient(new StringSession(session), API_ID, API_HASH,
+    {connectionRetries: 3, ...(proxy ? {proxy} : {})});
 }
 
 function songFromMessage(message) {

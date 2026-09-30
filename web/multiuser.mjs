@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { AccountStore } from './accounts.mjs';
+import { relayEnabled, startTelegramRelay } from './telegram-relay-local.mjs';
 
 const files = new Map([
   ['/web', [resolve('web/index.html'), 'text/html; charset=utf-8']],
@@ -70,6 +71,10 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
   const sessionKey = suppliedSessionKey ? validSessionKey(suppliedSessionKey) : await sessionKeyFor(dataDir);
   const store = new AccountStore(resolve(dataDir, 'accounts.json'));
   await store.load();
+  const relayUrl = process.env.TELOPOTIFY_RELAY_URL;
+  const relay = relayEnabled(process.env.TELOPOTIFY_RELAY_ENABLED, relayUrl) ?
+    await startTelegramRelay(relayUrl, process.env.TELOPOTIFY_RELAY_TOKEN) : null;
+  const relayPort = relay?.address().port;
   const sessions = new Map();
   const failures = new Map();
   const bridges = new Map();
@@ -92,7 +97,8 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
       const child = spawn(process.execPath, [bridgeScript], {
         cwd: resolve('.'), windowsHide: true, stdio: 'ignore',
         env: {...process.env, TELOPOTIFY_DATA_DIR: userDir, TELOPOTIFY_BRIDGE_PORT: '0',
-          TELOPOTIFY_SESSION_KEY: sessionKey},
+          TELOPOTIFY_SESSION_KEY: sessionKey,
+          TELOPOTIFY_SOCKS_PORT: relayPort ? String(relayPort) : ''},
       });
       entry.child = child;
       let spawnError = null;
@@ -202,7 +208,10 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
       console.error('Web account request failed:', error.message);
     }
   });
-  server.on('close', () => { for (const {child} of bridges.values()) child?.kill(); });
+  server.on('close', () => {
+    for (const {child} of bridges.values()) child?.kill();
+    relay?.close();
+  });
   return server;
 }
 
@@ -210,6 +219,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const server = await createMultiuserServer();
   server.listen(43129, '127.0.0.1', () => {
     console.log('Multi-user development web app ready at http://127.0.0.1:43129/web');
+    console.log(`Telegram relay: ${relayEnabled(process.env.TELOPOTIFY_RELAY_ENABLED,
+      process.env.TELOPOTIFY_RELAY_URL) ? 'on' : 'off'}`);
     console.log('Use HTTPS to expose port 43129; the Telegram API credentials here remain test-only.');
   });
 }

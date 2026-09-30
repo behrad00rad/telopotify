@@ -68,6 +68,40 @@ back into their web accounts; their saved Telegram sessions remain. This is a
 development implementation for a small trusted group, not a production-ready
 public sign-up service.
 
+### Telegram relay for a server where Telegram TCP is blocked
+
+`web/telegram-relay-worker.mjs` is a Cloudflare Worker that accepts authenticated
+WebSocket connections and opens raw TCP connections **only** to Telegram DC IPv4
+addresses on port 443. The web server starts a loopback-only SOCKS5 adapter and
+passes it to each account's Telegram bridge. The browser still connects to your
+normal web server; it never sees the relay token. This is for the multi-user web
+server, not a general-purpose proxy.
+
+Deploy the Worker from a machine that can reach Cloudflare:
+
+```sh
+npx wrangler login
+npx wrangler deploy web/telegram-relay-worker.mjs --name telopotify-telegram-relay --compatibility-date 2026-09-29
+npx wrangler secret put RELAY_TOKEN --name telopotify-telegram-relay
+```
+
+Generate a random token of at least 32 URL-safe characters (`node -e
+"console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`),
+enter it when Wrangler prompts, and store the same value as
+`TELOPOTIFY_RELAY_TOKEN` on the VPS. Set `TELOPOTIFY_RELAY_URL` to the deployed
+Worker's `wss://...workers.dev` URL. Set `TELOPOTIFY_RELAY_ENABLED=1` and run
+`npm run web:accounts` on the VPS with the existing stable
+`TELOPOTIFY_SESSION_KEY`. To switch to a direct Telegram connection, set
+`TELOPOTIFY_RELAY_ENABLED=0` and restart the web server; set it back to `1`
+and restart to use the Worker again. If the switch is unset, a configured
+relay URL enables it automatically. The server prints the active mode at
+startup. Do not commit either secret.
+The VPS must be able to establish HTTPS/WebSocket connections to the Worker;
+some networks block that too. Cloudflare can see the destination DC and traffic
+timing, although the Telegram protocol remains encrypted end-to-end. Test this
+with your own account before relying on it; the relay has not been exercised
+against a deployed Worker from an Iran VPS.
+
 ## Current experiment
 
 The local byte-range playback experiment uses only Node.js:
