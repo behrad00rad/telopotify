@@ -1,83 +1,132 @@
-# Telegram Music Player
+# Telopotify
 
-Windows-first React Native music player for streaming audio from a Telegram channel. iPhone support is deferred until the desktop player works.
+<p align="center"><img src="TelopotifyApp/assets/telopotify-logo.png" alt="Telopotify owl logo" width="104" /></p>
 
-The desktop streaming proof is working. See [TASKS.md](TASKS.md) for the backlog and [TASK-01-FINDINGS.md](TASK-01-FINDINGS.md) for validation details. `TelopotifyApp/src/core/` contains tested, platform-independent track mapping, search, and queue logic. `TelopotifyApp/App.tsx` browses a real channel through a local development bridge, and the React Native Windows app plays and seeks real Telegram audio.
+**Your Telegram music channel, in a music player.** Telopotify indexes song metadata from a channel you can access and streams audio when you press play. Opening a library does not download every song.
 
-The React Native app lives in `TelopotifyApp/`. Its Windows JavaScript bundle and native Debug x64 solution build successfully on this machine with Visual Studio 2026, .NET 10, and Windows SDK 10.0.26100. Because React Native Windows defaults to SDK 10.0.22621, use `npm run windows:build:installed-sdk` for a build-only check here. `npm run windows:installed-sdk` also deploys and launches after Windows trusted-app deployment is enabled. The root `package.json` is for the Telegram streaming probe and core tests.
+The project includes a React Native Windows player, a native iPhone player, and a responsive web player. Windows and web use a Node.js Telegram service. The iPhone player connects to Telegram itself through TDLib and needs no desktop bridge.
 
-## Run on this Windows PC
+> **Status:** Working development software for personal use and a small trusted group. The web-account service is not hardened for open public registration. Included Telegram Desktop API credentials are **test-only**; use your own API ID and hash before distribution.
 
-From PowerShell in `D:\musicplayer`, run:
+## Choose what to run
+
+| Experience | Start here | Telegram connection |
+| --- | --- | --- |
+| Windows app | `npm run app:windows` | Local bridge on the PC |
+| Web player, one library | `npm run dev:library` | Same local bridge and collection as Windows |
+| Shared remote web player | `npm run dev:library` and `npm run web:gateway` | One library behind a sharing password |
+| Separate web accounts | `npm run web:accounts` | Each person signs in to their own Telegram account |
+| Native iPhone app | [Build and install the IPA](#iphone-build-and-install) | TDLib on the iPhone; no PC or VPS required |
+
+Commands run from the **repository root** unless a section says to enter `TelopotifyApp/`. Browser-only use needs just the root Node dependencies. Native development also needs the React Native dependencies.
+
+## What is implemented
+
+- **Library:** Telegram login, channel selection, saved catalog, incremental new-post sync, search, recently added/played, artists, albums, liked songs, and playlists. The Windows/web bridge indexes up to 2,000 music messages per channel without downloading their audio.
+- **Playback:** On-demand byte-range streaming, seek, play/pause, queue, next/previous, shuffle, repeat, artwork, and a persistent Now Playing area. Windows also has native media controls, speed, sleep timer, and next-track preparation.
+- **Storage:** Encrypted/saved Telegram sessions, local collections, a bounded RAM stream cache, and optional selected-song offline downloads on Windows/web. The full channel is never downloaded automatically.
+- **iPhone:** Native TDLib access, paged song loading, saved catalog and channel choice, local likes/playlists, and native background-audio and lock-screen integration.
+
+The interfaces are **not fully feature-identical**. The iPhone app is independent of the Windows/web bridge, and local collections do not automatically sync between them. Long-session iPhone background playback and network interruption handling still need broader real-device testing.
+
+## Install
+
+Install [Git](https://git-scm.com/) and **Node.js 24** (recommended; the React Native package requires at least 22.11). Then:
+
+```sh
+git clone https://github.com/behrad00rad/telopotify.git
+cd telopotify
+npm ci
+```
+
+For **Windows or native mobile development**, also install:
+
+```sh
+cd TelopotifyApp
+npm ci
+cd ..
+```
+
+The web server does **not** require Visual Studio, Xcode, Android Studio, or `TelopotifyApp/node_modules`. It does use the checked-in logo from `TelopotifyApp/assets/`.
+
+### Windows build tools
+
+The native Windows build requires Visual Studio with C++/Windows app tools, the Windows SDK, **PowerShell 7** (`pwsh.exe`), and trusted-app deployment enabled. The launcher targets Windows SDK `10.0.26100.0`; install that SDK or adjust [the launcher](scripts/run-windows.ps1) to your version. This checkout was built with Visual Studio 2026 and that SDK.
+
+## Run the Windows app
+
+From PowerShell in the repository root:
 
 ```powershell
 npm run app:windows
 ```
 
-The launcher starts the local Telegram bridge and React Native development server if needed, then builds and opens the Windows app. The app finds the bridge and reconnects automatically; no address needs to be copied. Keep the bridge and development server running for streaming; the launcher reuses them on later runs. If this is a fresh checkout, run `npm ci` in both `D:\musicplayer` and `D:\musicplayer\TelopotifyApp` first.
+The launcher starts the Telegram bridge and Metro if needed, then builds and opens the app. It reuses running services on later launches. The app discovers its bridge automatically. Sign in to Telegram in the app, choose a channel, and let the first metadata index finish. Keep the bridge and Metro running while using this development build.
 
-React Native Windows needs PowerShell 7 (`pwsh.exe`). The launcher finds the standard installation or the copy bundled with Codex on this PC and adds it to its own process PATH. It reports a clear error if neither is available.
-
-## Responsive web player
-
-Start the Telegram service with `npm run dev:library`, then open
-`http://127.0.0.1:43127/web` on the same PC. The browser player has Home,
-Songs, Artists, Albums, Liked, Playlists, search, artwork, and a Now Playing
-view. The browser also has a bottom queue drawer, shuffle, and repeat. It uses the saved local Telegram session and streams audio by range;
-opening the page does not download the whole channel. The browser and Windows
-app share the channel, likes, and playlists stored by the local service.
-
-To use it from other devices, keep the Windows PC and Telegram service running.
-Set a strong sharing password and start the separate gateway:
+To see service errors separately, use two terminals, then retry `npm run app:windows`:
 
 ```powershell
-$env:TELOPOTIFY_WEB_PASSWORD = 'your-long-unique-password'
+# Terminal 1: repository root
+npm run dev:library
+
+# Terminal 2: TelopotifyApp directory
+cd TelopotifyApp
+npm start
+```
+
+The bridge is loopback-only at `127.0.0.1:43127`. **Never expose that port publicly.**
+
+## Run the web player
+
+### One local library
+
+```sh
+npm run dev:library
+```
+
+Open **<http://127.0.0.1:43127/web>** on the same PC. This uses the same Telegram session, channel, likes, and playlists as Windows. The responsive browser player has Home, Songs, Artists, Albums, Liked, Playlists, search, a full Now Playing view, and a bottom queue drawer.
+
+### Share one library with other devices
+
+Keep `npm run dev:library` running. In a second terminal, set a strong password and run the gateway:
+
+```powershell
+$env:TELOPOTIFY_WEB_PASSWORD = 'replace-with-a-long-unique-password'
 npm run web:gateway
 ```
 
-The gateway listens only on `127.0.0.1:43128`. Publish **that port only**
-through an HTTPS tunnel, such as [Tailscale Funnel](https://tailscale.com/docs/reference/tailscale-cli/funnel)
-(`tailscale funnel 43128`),
-and open the tunnel's `/web` URL on the other device. The gateway asks for the
-sharing password before it exposes music metadata or audio. Keep port `43127`
-private; it is the local Windows-app service. Everyone with the sharing password
-uses the same channel, likes, and playlists. Closing the PC or the service
-stops remote streaming. The iPhone native app remains independent of the PC.
+On Linux/macOS, use `export TELOPOTIFY_WEB_PASSWORD='...'` before the gateway command. It listens at `127.0.0.1:43128`. Publish **43128**, not 43127, through an HTTPS tunnel or reverse proxy; open the public URL with `/web` appended. Everyone with the password shares one Telegram account and library. Closing the PC or service stops streaming.
 
-### Separate web accounts (development)
+### Give each person a separate web account
 
-Run `npm run web:accounts` and open `http://127.0.0.1:43129/web`. Each person
-creates a web account, then signs in to their own Telegram account and chooses
-their own channel. Accounts have separate Telegram sessions, catalogs, artwork,
-likes, and playlists in ignored `local-data/web-accounts/`. The server listens
-on localhost; use an HTTPS tunnel or reverse proxy to reach it from other devices.
-Do not expose the local bridge ports. Use persistent storage for
-`local-data/web-accounts/` on a hosted server.
+```sh
+npm run web:accounts
+```
 
-The included Telegram Desktop API credentials remain **test-only**. Before
-releasing a public service, set `TELOPOTIFY_API_ID` and `TELOPOTIFY_API_HASH`
-to your own app credentials. The local Windows desktop bridge uses DPAPI;
-the multi-user web server creates an ignored `local-data/web-accounts/session.key`
-on Windows and uses it to encrypt its Telegram sessions without PowerShell.
-Keep this file with the account data across restarts. On Linux or other hosted systems, set a stable
-`TELOPOTIFY_SESSION_KEY` to a base64-encoded 32-byte secret before starting the
-server; preserve that key securely or saved Telegram sessions cannot be
-restored. Web account passwords are stored as salted scrypt hashes. Web login
-cookies last seven days but become invalid when the server restarts, so users log
-back into their web accounts; their saved Telegram sessions remain. This is a
-development implementation for a small trusted group, not a production-ready
-public sign-up service.
+Open **<http://127.0.0.1:43129/web>** locally. Each person creates a Telopotify web account, signs in to Telegram, and chooses a channel. Their Telegram session, catalog, artwork cache, likes, and playlists are kept separately under ignored `local-data/web-accounts/`. Publish only **43129** through an HTTPS reverse proxy or tunnel. The Node server intentionally binds to `127.0.0.1`, so a reverse proxy should run on the same host.
 
-### Telegram relay for a server where Telegram TCP is blocked
+On a Linux VPS, generate a **stable** 32-byte base64 key once and save it as `TELOPOTIFY_SESSION_KEY` in your host's secret manager or a protected environment file:
 
-`web/telegram-relay-worker.mjs` is a Cloudflare Worker that accepts authenticated
-WebSocket connections and opens raw TCP connections **only** to Telegram DC IPv4
-addresses on port 443. The web server starts a loopback-only SOCKS5 adapter and
-passes it to each account's Telegram bridge. The browser still connects to your
-normal web server; it never sees the relay token. This is for the multi-user web
-server, not a general-purpose proxy.
+```sh
+openssl rand -base64 32
+# Save the generated value securely, then supply it to this shell:
+export TELOPOTIFY_SESSION_KEY='your-saved-base64-key'
+npm run web:accounts
+```
 
-Deploy the Worker from a machine that can reach Cloudflare:
+On Windows, the server creates an ignored `local-data/web-accounts/session.key` when the environment variable is absent. Preserve that file. Changing or losing the key makes saved Telegram sessions unreadable. Back up `local-data/web-accounts/` securely; Git ignores it. Web-account passwords are salted scrypt hashes. Web login cookies expire after seven days and clear on server restart, but saved Telegram sessions remain.
+
+For internet hosting, run Node with a process manager so it restarts after a crash or reboot, use persistent storage, and route a dedicated HTTPS hostname to port 43129. A separate host/domain can keep Telopotify apart from an existing website. This development server permits self-registration, so restrict access to a trusted group until public-account controls and operational security have been reviewed.
+
+### GitHub Codespaces: web-only test
+
+Create a Codespace from this repository, run `npm ci`, add a persistent Codespaces secret called `TELOPOTIFY_SESSION_KEY`, then run `npm run web:accounts`. Forward port **43129** and append `/web` to the HTTPS forwarding URL. A private port requires GitHub login; a public port lets anyone with the URL reach signup. Codespaces stops after inactivity and is a test environment, not 24/7 hosting. Ignored account data disappears if the Codespace is deleted.
+
+## Optional Cloudflare Worker relay
+
+Use this **only with `web:accounts`** when the server can reach Cloudflare over WSS but cannot reach Telegram directly. The Node server starts a loopback SOCKS5 adapter; the Worker relays Telegram protocol bytes to Telegram DC IPv4 addresses on port 443. The browser never receives the relay token. The Worker is neither a general-purpose proxy nor a host for the web app.
+
+Deploy from a machine that can access Cloudflare, in the repository root:
 
 ```sh
 npx wrangler login
@@ -85,93 +134,99 @@ npx wrangler deploy web/telegram-relay-worker.mjs --name telopotify-telegram-rel
 npx wrangler secret put RELAY_TOKEN --name telopotify-telegram-relay
 ```
 
-Generate a random token of at least 32 URL-safe characters (`node -e
-"console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`),
-enter it when Wrangler prompts, and store the same value as
-`TELOPOTIFY_RELAY_TOKEN` on the VPS. Set `TELOPOTIFY_RELAY_URL` to the deployed
-Worker's `wss://...workers.dev` URL. Set `TELOPOTIFY_RELAY_ENABLED=1` and run
-`npm run web:accounts` on the VPS with the existing stable
-`TELOPOTIFY_SESSION_KEY`. To switch to a direct Telegram connection, set
-`TELOPOTIFY_RELAY_ENABLED=0` and restart the web server; set it back to `1`
-and restart to use the Worker again. If the switch is unset, a configured
-relay URL enables it automatically. The server prints the active mode at
-startup. Do not commit either secret.
-The VPS must be able to establish HTTPS/WebSocket connections to the Worker;
-some networks block that too. Cloudflare can see the destination DC and traffic
-timing, although the Telegram protocol remains encrypted end-to-end. Test this
-with your own account before relying on it; the relay has not been exercised
-against a deployed Worker from an Iran VPS.
+Generate a token with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`. Enter it at Wrangler's secret prompt. Supply the **same** value as `TELOPOTIFY_RELAY_TOKEN` on the web server, plus the Worker's `wss://...workers.dev` URL:
 
-## Current experiment
-
-The local byte-range playback experiment uses only Node.js:
-
-```powershell
-node --test --test-isolation=none TelopotifyApp/src/core/*.test.mjs spikes/range-stream/*.test.mjs spikes/telegram-client/*.test.mjs
-node spikes/range-stream/server.mjs "C:\path\to\a\song.mp3"
+```sh
+# Linux shell example; use your own saved secrets and URL.
+export TELOPOTIFY_RELAY_URL='wss://your-worker.your-subdomain.workers.dev'
+export TELOPOTIFY_RELAY_ENABLED=1
+export TELOPOTIFY_RELAY_TOKEN='your-saved-relay-token'
+export TELOPOTIFY_SESSION_KEY='your-existing-saved-session-key'
+npm run web:accounts
 ```
 
-Open the printed localhost URL, play the song, and seek. The console logs the ranges requested by the player. This experiment reads a local file; the Telegram-backed development bridge is described below.
+Set `TELOPOTIFY_RELAY_ENABLED=0` and **restart** the web server for direct Telegram access; set it to `1` and restart to use the Worker. If unset, a configured relay URL enables it automatically. Startup prints `Telegram relay: on` or `off`. Do not commit either secret. The relay passed local tests but has **not** been verified against a deployed Worker from an Iran VPS; the VPS must be able to reach the Worker over WSS.
 
-## GitHub hygiene
+## iPhone build and install
 
-The repository ignores `.env` files, Telegram sessions, downloaded media, and caches. Keep Telegram API credentials and login details in local storage only. Inspect `git status` and the staged diff before publishing.
+The native iPhone app uses TDLib and its own audio module. It does not depend on `web:accounts`, the Windows bridge, or the Cloudflare relay. The [iOS build workflow](.github/workflows/ios-build.yml) runs on GitHub-hosted macOS, compiles a Simulator build, builds an unsigned iPhone app, and uploads `Telopotify-unsigned-iPhone-IPA`.
 
-## Telegram app registration
+1. On GitHub, choose **Actions → iOS build → Run workflow** on `main`. Pushing to `main` also starts it.
+2. Open the completed run, download the `Telopotify-unsigned-iPhone-IPA` artifact, and extract its ZIP to get the unsigned `.ipa`.
+3. Sign and install the IPA with your Apple ID using AltStore/AltServer or another signing method. The unsigned artifact cannot be installed directly.
+4. Open the app, sign in to Telegram, choose a channel, and browse.
 
-Telegram's [official instructions](https://core.telegram.org/api/obtaining_api_id) require signing in at [my.telegram.org](https://my.telegram.org), opening **API development tools**, and creating an application to obtain an API ID and hash. An account can have only one API ID. The current blocker is a generic `ERROR` alert after submitting the application form; Telegram's guide does not identify a cause for that alert.
+If you have a Mac with Xcode, install the React Native dependencies above, then:
 
-Reasonable diagnostic attempts are to check whether the account already has an application, retry with a unique short name made of plain letters and digits and **Desktop** as the platform, and try the form in a fresh browser session or on the phone. These are troubleshooting attempts, not a confirmed fix. Avoid repeated rapid submissions. If the alert persists, record the browser, form fields excluding private information, and whether the same account works on another device. Do not share API hashes, sign-in codes, or session files.
-
-The sample API credentials in Telegram's open-source clients are limited to testing and [must not be used for a released app](https://core.telegram.org/api/obtaining_api_id).
-
-## Test one real song with Telegram's development credentials
-
-The `spikes/telegram-client/` probe uses the [public TEST ONLY credentials published in Telegram Desktop's source](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md). It signs in locally, lists channels and music messages, and serves one selected song in a local browser player using small byte-range requests. It does not download the full channel.
-
-```powershell
-npm ci
-npm run spike:telegram
+```sh
+bundle install --gemfile=TelopotifyApp/Gemfile
+cd TelopotifyApp/ios
+bundle exec pod install
+cd ..
+npm run ios
 ```
 
-Enter the phone number, login code, and two-step password **in the terminal only**. On Windows, the session is encrypted for your Windows account in ignored `local-data/telegram.session`; delete that file to require a fresh sign-in. Select a channel and song by number, then open the printed localhost URL and test play and seek. This development probe is not yet the React Native Windows app. Teleproto's chunk iterator may fail on some Telegram CDN redirects; record the error if that happens. The published credentials are limited and unsuitable for release.
+The GitHub workflow is the build path when you have no Mac. Long background sessions, lock-screen controls, VPN changes, and interruptions still need extended listening tests. The iPhone module currently embeds the same test-only Telegram API credentials.
 
-## Browse your channel in the development app
+## Every project run command
 
-Run the local bridge from the repository root:
+| Directory | Command | Purpose |
+| --- | --- | --- |
+| Root | `npm ci` | Install bridge, web, and root test dependencies |
+| Root | `npm run app:windows` | Start services, build, and open Windows |
+| Root | `npm run dev:library` | Local bridge and browser player on 43127 |
+| Root | `npm run web:gateway` | Shared password gateway on 43128 |
+| Root | `npm run web:accounts` | Separate web accounts on 43129 |
+| Root | `npm run spike:telegram` | Interactive one-song Telegram streaming probe |
+| Root | `npm test` | Root/shared-core, Telegram service, and web tests |
+| Root | `npm run icons:windows` | Regenerate Windows icons from the logo |
+| Root | `node scripts/import-desktop-export.mjs "path/to/result.json"` | Import Telegram Desktop JSON metadata without playable audio |
+| Root | `node spikes/range-stream/server.mjs "path/to/song.mp3"` | Local-file byte-range streaming experiment |
+| `TelopotifyApp/` | `npm ci` | Install React Native dependencies |
+| `TelopotifyApp/` | `npm start` | Start Metro |
+| `TelopotifyApp/` | `npm run windows` | Standard React Native Windows command; uses the default SDK target |
+| `TelopotifyApp/` | `npm run windows:installed-sdk` | Build, deploy, and launch Windows with SDK 10.0.26100 |
+| `TelopotifyApp/` | `npm run windows:build:installed-sdk` | Windows build-only check with that SDK |
+| `TelopotifyApp/` | `npm run test:windows` | Windows component tests |
+| `TelopotifyApp/` | `npm test` | React Native Jest tests |
+| `TelopotifyApp/` | `npm run lint` | ESLint |
+| `TelopotifyApp/` | `npm run ios` | Build/run on a Mac with Xcode and CocoaPods |
+| `TelopotifyApp/` | `npm run android` | Android scaffold; Android playback has not been validated |
 
-```powershell
-npm run dev:library
-```
+The scripts are defined in [root package.json](package.json) and [native package.json](TelopotifyApp/package.json). The installed-SDK Windows variant matches the machine used for development.
 
-The bridge binds to `127.0.0.1:43127` and exposes a loopback-only discovery endpoint for the Windows app. The app obtains the current access token there automatically, including after a bridge restart. Keep the bridge terminal running if you start it manually. If there is no saved session, enter your phone number, Telegram code, and any requested two-step password or email code in the app. Then choose a channel; indexing reads up to 2,000 music-message records without downloading audio. The earlier plaintext development session is migrated in place to Windows DPAPI encryption, and transient Telegram connection failures are retried with bounded backoff. The encrypted session and selected 1,120-song channel were restored successfully after a live bridge restart. **Sign out** removes the local session and saved catalog. The sign-in prompts have automated tests, but a fresh live login and logout have not been exercised.
+## Data, credentials, and limits
 
-The library has a channel collection header, search, a song table, a queue view, and persistent player controls. Clicking a song starts playback. The Windows app has a native MediaPlayer adapter with play/pause, playback status, click-to-seek, volume, end-of-song advance, and repeat off/all/one. The play button shows a pause icon while a song is opening, buffering, or playing, and switches back when paused or stopped. Interface controls use Windows icon glyphs instead of emoji. Playback and seeking were verified against real Telegram audio; the new end-of-song and volume controls have passed the native build but still need live listening verification. On other platforms, Play opens the browser, but automatic bridge discovery currently works only on the same Windows PC. Each stream request retrieves at most 512 KB from Telegram. The bridge retries transient chunk failures and returns HTTP 502 when Telegram stays unavailable. It saves the last indexed song metadata and the newest indexed message ID to ignored `local-data/bridge-library.json`. After reconnecting, the bridge checks only newer channel posts, automatically every minute or when **Sync** is clicked; a refresh keeps the current playback and queue. Historical songs resolve their Telegram message only when played, so restart does not re-index the whole catalog. If Telegram cannot connect on the next launch, the app can browse the saved catalog while playback is disabled. The ignored, DPAPI-encrypted Telegram session remains on this Windows account. Do not publish the bridge connection address or expose the local port to other devices. The public test-only Telegram API credentials still make this bridge unsuitable for distribution.
+| Data | Location / behavior |
+| --- | --- |
+| Desktop Telegram session | `local-data/telegram.session`, protected with Windows DPAPI for the current user |
+| Desktop catalog and collections | `local-data/bridge-library.json` and `local-data/collections.json` |
+| Desktop/web cache and selected offline songs | `local-data/artwork/` and `local-data/offline/` |
+| Separate web accounts | `local-data/web-accounts/`, including per-user encrypted Telegram sessions |
+| iPhone data | App-private iOS and TDLib storage on the device |
 
-The bridge keeps recent streaming ranges in RAM, capped at 32 MiB by default; only songs explicitly saved for offline use are stored on disk. Set `TELOPOTIFY_CACHE_MB` to an integer from 0 to 256 before starting the bridge to change the RAM cap (0 disables it). The player shows usage and a **Clear** control. The RAM cache clears on bridge restart, channel change, and sign-out; its oldest ranges are evicted first, preferring to keep the currently requested song. A deleted song is marked unavailable when Telegram confirms its message is gone, and the player skips it in the queue. Streaming errors show a Retry control. A real network outage and removed-song scenario still need live testing.
+`local-data/`, `.env` files, downloaded media, and build output are Git-ignored. **The Node scripts do not automatically load a `.env` file:** set variables in your shell, process manager, or hosting secrets. Do not publish login codes, API hashes, encryption keys, relay tokens, or session files. Sign out clears local session and library data for that client.
 
-Favorites, named playlists, and the edited play queue are saved per channel in ignored `local-data/collections.json`. Star a song to add it to Favorites, use its playlist icon to add or remove it from a playlist, and use **Play next** to move it after the current song. The Queue view lets you move songs up or down, remove them, or clear the queue. Playlists can be created, renamed, played, and deleted. The previous queue and repeat mode restore after restart without starting playback. **Sign out** removes these local collections along with the session and catalog. This development bridge stores collection metadata locally; it does not sync it to Telegram or across devices.
+The desktop bridge keeps recent streaming bytes in RAM, capped at 32 MiB by default. Set `TELOPOTIFY_CACHE_MB` to `0`–`256` before starting the bridge to change it. Optional offline songs have a separate selectable storage cap. New posts sync from a saved message cursor, including an automatic check about once per minute. A confirmed missing song is skipped rather than blocking the queue.
 
-The library and playlists now have Shuffle actions; **Shuffle next** rearranges only upcoming queue entries, keeping the current song in place. Queue rows have a drag handle alongside the move buttons. Library and Favorites offer artist text filtering, duration and file-type filters, and sorting by newest, title, artist, or duration. Recently played songs are saved per channel (up to 50 entries). Windows media keys and the system playback panel use the native MediaPlayer, including track title and artist and next/previous commands. The native build passes; media-key behavior still needs a live Windows check.
+Artwork loads lazily: Telegram thumbnail first, then MusicBrainz and Cover Art Archive when needed. External matches can be absent or identify another edition. Custom cover URLs and album labels remain local. MusicBrainz's public API is intended for non-commercial use and has rate limits.
 
-On this machine, the user approved enabling `AllowAllTrustedApps`, and React Native deployed and launched the app successfully. The Visual Studio installer requested a restart, but the build and launch succeeded without one.
+### Telegram API credentials
 
-## Library views and offline listening
+The project uses [Telegram Desktop's published test credentials](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md), because app registration at [my.telegram.org/apps](https://my.telegram.org/apps) returned a generic `ERROR` during development. For release, follow [Telegram's API ID instructions](https://core.telegram.org/api/obtaining_api_id) and use your own credentials. The Node bridge reads `TELOPOTIFY_API_ID` and `TELOPOTIFY_API_HASH`; the iPhone module still contains test credentials in `TelopotifyApp/ios/TelopotifyApp/TelopotifyTelegram.swift` and needs a production credential path before distribution.
 
-The Windows interface has a Home page, searchable Tracks, Artists, Albums, Liked songs, Playlists, Queue, Recent, and a full Now Playing view. The persistent player opens Now Playing when clicked and keeps Like and Add to playlist beside the current song. The desktop layout uses a dark navigation rail and a compact playback bar. Artist groups come from the indexed artist metadata. Telegram's current catalog does not provide album names, so use **Set album** on a track to give it a local album label; unlabeled songs appear in **Unsorted tracks**. Album labels stay with the channel's local collections and are removed on sign-out.
+If the app form fails, check whether the account already has an app, try a unique alphanumeric short name, and retry in a fresh browser session. These are diagnostic attempts, not a confirmed fix. Do not share login details or repeatedly submit the form.
 
-Artwork loads only when a cover is visible. The bridge first tries the song's Telegram document thumbnail, then Telegram's album-thumbnail service. If neither has an image, it sends the song title and artist to MusicBrainz to identify a release and asks the Cover Art Archive for its front cover. A locally assigned album label narrows the release choice. Automatic matching is conservative, but can still choose the wrong edition or find nothing. Open **Now playing → Edit cover** to paste an HTTPS image URL or clear that field to return to automatic artwork. These per-song overrides are saved with local collections. Resolved images and misses are cached under ignored `local-data/artwork/` (up to 128 MiB of images); sign-out removes them. This does not download song audio. MusicBrainz's public API is for non-commercial use, requires an identifying User-Agent, and is limited to about one lookup per second.
+## Troubleshooting
 
-The player can save individual songs or a playlist for offline listening without saving the whole channel. Use the download action beside a song, or **Save offline** in a playlist. Selected audio is stored under ignored `local-data/offline/`, with a configurable cap of 128 MB, 512 MB (default), 1 GB, or 2 GB from the Tracks page. The bridge reports download progress, serves pinned songs by byte range even when Telegram is unavailable, and removes downloaded audio when you unpin it or sign out. The 32 MiB RAM streaming cache is separate from these optional offline files.
+| Symptom | Check |
+| --- | --- |
+| Windows says `Unable to find pwsh.exe` | Install PowerShell 7, then retry `npm run app:windows`. |
+| Windows stays at Connecting | Run `npm run dev:library` separately and read its error; check port 43127 and Telegram/VPN connectivity. |
+| Web loads but playback fails | Keep its Node service running and inspect its terminal output. The one-library player also needs the bridge. |
+| Web account forgets Telegram login | Preserve `local-data/web-accounts/` and the same `TELOPOTIFY_SESSION_KEY`. The web-account login itself must be repeated after a server restart. |
+| Relay is on but Telegram still fails | Check VPS-to-Worker WSS access, URL, matching tokens, and Worker deployment. Compare with `TELOPOTIFY_RELAY_ENABLED=0` after restarting. |
+| Codespace URL is inaccessible to others | Make port 43129 public in Ports, knowing that signup then becomes publicly reachable. |
+| iPhone IPA will not install | The CI IPA is unsigned; sign it with AltStore/AltServer or another Apple signing flow. |
 
-The playback bar also has a sleep timer (15, 30, or 60 minutes) and speed control (0.75–2×). The Windows player prepares the next queue item to reduce gaps between songs. Crossfade is not available yet. These newer native controls and offline playback have automated/build coverage but still need a full listening check in the running app.
-
-## Import channel metadata without an API ID
-
-Telegram Desktop can [export an individual chat as JSON](https://telegram.org/blog/export-and-more). In the channel, use its menu → **Export chat history**, choose **JSON**, and turn off media downloads. Then run:
-
-```powershell
-node scripts/import-desktop-export.mjs "C:\path\to\export\result.json"
-```
-
-This creates an ignored `local-data/library.json` containing song titles, artists, file sizes, and original message IDs. It reports how many songs are larger than the hosted Bot API's 20 MB download limit. The export file and generated library are ignored by Git because channel metadata may be private. This is a catalog import; it does not provide playable file URLs.
+Development history and unfinished validation work: [TASKS.md](TASKS.md) · [TASK-01-FINDINGS.md](TASK-01-FINDINGS.md).
