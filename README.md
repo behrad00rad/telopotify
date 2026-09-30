@@ -168,6 +168,8 @@ npm run ios
 
 The GitHub workflow is the build path when you have no Mac. Long background sessions, lock-screen controls, VPN changes, and interruptions still need extended listening tests. The iPhone module currently embeds the same test-only Telegram API credentials.
 
+The iOS bundle identifier is `com.behrad00rad.telopotify`. It replaces the React Native template identifier in both Debug and Release. Installing this build alongside an older build with the template identifier creates a separate app; app-private Telegram data does not transfer automatically. A **paid Apple Developer Program membership** is required to register the identifier, create the App Store Connect app record, and distribute through TestFlight. The current GitHub workflow builds an unsigned IPA; signing and TestFlight upload are not configured yet.
+
 ## Every project run command
 
 | Directory | Command | Purpose |
