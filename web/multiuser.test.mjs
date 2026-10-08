@@ -5,7 +5,36 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
-import { createMultiuserServer } from './multiuser.mjs';
+import { createMultiuserServer, webListenAddress } from './multiuser.mjs';
+
+test('web listener defaults to loopback and accepts hosting port settings', () => {
+  assert.deepEqual(webListenAddress({}), {host: '127.0.0.1', port: 43129});
+  assert.deepEqual(webListenAddress({TELOPOTIFY_WEB_HOST: '0.0.0.0', PORT: '8080'}),
+    {host: '0.0.0.0', port: 8080});
+  assert.deepEqual(webListenAddress({TELOPOTIFY_WEB_PORT: '9000', PORT: '8080'}),
+    {host: '127.0.0.1', port: 9000});
+  assert.throws(() => webListenAddress({PORT: 'invalid'}), /must be an integer/);
+});
+
+test('new web accounts are closed unless the owner enables registration', async () => {
+  const dir = await mkdtemp(resolve(tmpdir(), 'telopotify-closed-signups-'));
+  const server = await createMultiuserServer({dataDir: dir,
+    sessionKey: randomBytes(32).toString('base64'), allowSignups: false});
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const session = await (await fetch(`${base}/web/session`)).json();
+    assert.equal(session.registrationOpen, false);
+    const register = await fetch(`${base}/web/register`, {method: 'POST',
+      headers: {'Content-Type': 'application/json', Origin: base},
+      body: JSON.stringify({username: 'new_user', password: 'strong-password-123'})});
+    assert.equal(register.status, 403);
+  } finally {
+    await new Promise(done => server.close(done));
+    await rm(dir, {recursive: true, force: true});
+  }
+});
 
 test('web accounts keep bridge routes and data separate', async () => {
   const dir = await mkdtemp(resolve(tmpdir(), 'telopotify-web-test-'));
@@ -21,7 +50,7 @@ sessionKeyReady:Buffer.from(process.env.TELOPOTIFY_SESSION_KEY||'','base64').len
 server.listen(0,'127.0.0.1',async()=>{await mkdir(folder,{recursive:true});
 await writeFile(resolve(folder,'bridge-connection.json'),JSON.stringify({address:'http://127.0.0.1:'+server.address().port+'?token=bridge-secret'}));});`);
   const server = await createMultiuserServer({dataDir: resolve(dir, 'accounts'), bridgeScript: mock,
-    sessionKey: randomBytes(32).toString('base64')});
+    sessionKey: randomBytes(32).toString('base64'), allowSignups: true});
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;

@@ -134,8 +134,9 @@ export function createGateway(password) {
       }
       await proxy(request, response, url);
     } catch (error) {
-      if (!response.headersSent) send(response, 502, {error: error.message});
+      if (!response.headersSent) send(response, 502, {error: 'Service unavailable. Try again shortly.'});
       else response.destroy();
+      console.error('Web gateway request failed:', error.message);
     }
   });
 }

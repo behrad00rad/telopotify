@@ -19,6 +19,16 @@ const apiPaths = new Set(['/status', '/reconnect', '/auth/start', '/auth/input',
   '/channels', '/channels/select', '/library', '/library/sync', '/collections']);
 const lifetime = 7 * 24 * 60 * 60 * 1000;
 
+export function webListenAddress(env = process.env) {
+  const host = env.TELOPOTIFY_WEB_HOST || '127.0.0.1';
+  const portText = env.TELOPOTIFY_WEB_PORT || env.PORT || '43129';
+  const port = Number(portText);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('TELOPOTIFY_WEB_PORT (or PORT) must be an integer from 1 to 65535');
+  }
+  return {host, port};
+}
+
 function send(response, status, value, headers = {}) {
   response.writeHead(status, {'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
@@ -67,7 +77,8 @@ async function sessionKeyFor(dataDir) {
 }
 
 export async function createMultiuserServer({dataDir = resolve('local-data/web-accounts'),
-  bridgeScript = resolve('spikes/telegram-client/library-server.mjs'), sessionKey: suppliedSessionKey} = {}) {
+  bridgeScript = resolve('spikes/telegram-client/library-server.mjs'), sessionKey: suppliedSessionKey,
+  allowSignups = process.env.TELOPOTIFY_ALLOW_SIGNUPS === '1'} = {}) {
   const sessionKey = suppliedSessionKey ? validSessionKey(suppliedSessionKey) : await sessionKeyFor(dataDir);
   const store = new AccountStore(resolve(dataDir, 'accounts.json'));
   await store.load();
@@ -162,12 +173,15 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
       if (url.pathname === '/web/session' && request.method === 'GET') {
         const session = accountFor(request);
         send(response, 200, {remote: true, multiuser: true, authenticated: Boolean(session),
-          username: session?.username || null}); return;
+          username: session?.username || null, registrationOpen: allowSignups}); return;
       }
       if (request.method === 'POST' && !sameOrigin(request)) {
         send(response, 403, {error: 'Invalid request origin'}); return;
       }
       if (request.method === 'POST' && ['/web/register', '/web/login'].includes(url.pathname)) {
+        if (url.pathname === '/web/register' && !allowSignups) {
+          send(response, 403, {error: 'Account registration is closed. Ask the server owner to enable it.'}); return;
+        }
         const key = request.socket.remoteAddress || 'unknown';
         const recent = (failures.get(key) || []).filter(time => time > Date.now() - 15 * 60_000);
         if (recent.length >= 12) { send(response, 429, {error: 'Too many attempts. Try later.'}); return; }
@@ -217,10 +231,12 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const server = await createMultiuserServer();
-  server.listen(43129, '127.0.0.1', () => {
-    console.log('Multi-user development web app ready at http://127.0.0.1:43129/web');
+  const {host, port} = webListenAddress();
+  server.listen(port, host, () => {
+    console.log(`Multi-user web app listening on ${host}:${port}; open /web through an HTTPS address.`);
     console.log(`Telegram relay: ${relayEnabled(process.env.TELOPOTIFY_RELAY_ENABLED,
       process.env.TELOPOTIFY_RELAY_URL) ? 'on' : 'off'}`);
+    console.log(`New account registration: ${process.env.TELOPOTIFY_ALLOW_SIGNUPS === '1' ? 'on' : 'off'}`);
     console.log('Use HTTPS to expose port 43129; the Telegram API credentials here remain test-only.');
   });
 }

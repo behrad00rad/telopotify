@@ -8,6 +8,8 @@ The project includes a React Native Windows player, a native iPhone player, and 
 
 > **Status:** Working development software for personal use and a small trusted group. The web-account service is not hardened for open public registration. Included Telegram Desktop API credentials are **test-only**; use your own API ID and hash before distribution.
 
+Source code is available under the [MIT license](LICENSE). Repository visibility does not expose local Telegram sessions or account data; keep `local-data/`, signing files, and environment secrets out of Git. Publishing the source does **not** make the hosted web-account service ready for unrestricted public use.
+
 ## Choose what to run
 
 | Experience | Start here | Telegram connection |
@@ -103,7 +105,13 @@ On Linux/macOS, use `export TELOPOTIFY_WEB_PASSWORD='...'` before the gateway co
 npm run web:accounts
 ```
 
-Open **<http://127.0.0.1:43129/web>** locally. Each person creates a Telopotify web account, signs in to Telegram, and chooses a channel. Their Telegram session, catalog, artwork cache, likes, and playlists are kept separately under ignored `local-data/web-accounts/`. Publish only **43129** through an HTTPS reverse proxy or tunnel. The Node server intentionally binds to `127.0.0.1`, so a reverse proxy should run on the same host.
+Open **<http://127.0.0.1:43129/web>** locally. Each person signs in to a Telopotify web account, connects their own Telegram account, and chooses a channel. Their Telegram session, catalog, artwork cache, likes, and playlists are kept separately under ignored `local-data/web-accounts/`.
+
+New account registration is **closed by default**. To create accounts, start the server with `TELOPOTIFY_ALLOW_SIGNUPS=1`, create the accounts, then restart it without that setting. On PowerShell, run `$env:TELOPOTIFY_ALLOW_SIGNUPS = '1'` before `npm run web:accounts`; run `Remove-Item Env:TELOPOTIFY_ALLOW_SIGNUPS` before restarting to close registration. Only leave registration open on a trusted, access-controlled service. Existing users can sign in while registration is closed.
+
+**Phone and other-device access:** give this server its own HTTPS address (for example, `https://music.example.com`) and forward that address to `http://127.0.0.1:43129` on the same host. Open `https://music.example.com/web` on each device. Forward the entire site, including `/web`, `/auth`, `/audio`, and `/artwork`; the browser uses same-origin requests. A Cloudflare Tunnel public hostname can point to `http://localhost:43129`, or an HTTPS reverse proxy can pass the original `Host` header. This uses a separate hostname and does not require changing an existing website. **Do not publish the Telegram bridge on port 43127.** A direct `http://<LAN-IP>:43129` URL cannot sign in: web-account cookies require HTTPS.
+
+The account server binds to `127.0.0.1:43129` by default. For a container or hosting platform that needs a public interface, set `TELOPOTIFY_WEB_HOST=0.0.0.0`; set `TELOPOTIFY_WEB_PORT` or the platform's `PORT` to choose the listener port. Put HTTPS in front of it and limit direct access to the HTTP port.
 
 On a Linux VPS, generate a **stable** 32-byte base64 key once and save it as `TELOPOTIFY_SESSION_KEY` in your host's secret manager or a protected environment file:
 
@@ -116,11 +124,11 @@ npm run web:accounts
 
 On Windows, the server creates an ignored `local-data/web-accounts/session.key` when the environment variable is absent. Preserve that file. Changing or losing the key makes saved Telegram sessions unreadable. Back up `local-data/web-accounts/` securely; Git ignores it. Web-account passwords are salted scrypt hashes. Web login cookies expire after seven days and clear on server restart, but saved Telegram sessions remain.
 
-For internet hosting, run Node with a process manager so it restarts after a crash or reboot, use persistent storage, and route a dedicated HTTPS hostname to port 43129. A separate host/domain can keep Telopotify apart from an existing website. This development server permits self-registration, so restrict access to a trusted group until public-account controls and operational security have been reviewed.
+For internet hosting, run Node with a process manager so it restarts after a crash or reboot, use persistent storage, and route a dedicated HTTPS hostname to port 43129. A separate host/domain can keep Telopotify apart from an existing website. This is still development software intended for a trusted group; registration must be explicitly enabled, and a fully public service needs further operational security review.
 
 ### GitHub Codespaces: web-only test
 
-Create a Codespace from this repository, run `npm ci`, add a persistent Codespaces secret called `TELOPOTIFY_SESSION_KEY`, then run `npm run web:accounts`. Forward port **43129** and append `/web` to the HTTPS forwarding URL. A private port requires GitHub login; a public port lets anyone with the URL reach signup. Codespaces stops after inactivity and is a test environment, not 24/7 hosting. Ignored account data disappears if the Codespace is deleted.
+Create a Codespace from this repository, run `npm ci`, add a persistent Codespaces secret called `TELOPOTIFY_SESSION_KEY`, then run `npm run web:accounts`. Forward port **43129** and append `/web` to the HTTPS forwarding URL. A private port requires GitHub login; a public port exposes the login page to anyone with the URL. Enable registration only when needed. Codespaces stops after inactivity and is a test environment, not 24/7 hosting. Ignored account data disappears if the Codespace is deleted.
 
 ## Optional Cloudflare Worker relay
 

@@ -5,7 +5,7 @@ const navItems = [
   ['Albums', 'albums'], ['Liked', 'heart'], ['Playlists', 'playlists'],
 ];
 const state = {
-  token: '', remote: false, multiuser: false, accountMode: 'login', webAuthenticated: true, status: null, tracks: [], channel: '', channelId: null, revision: -1,
+  token: '', remote: false, multiuser: false, registrationOpen: false, accountMode: 'login', webAuthenticated: true, status: null, tracks: [], channel: '', channelId: null, revision: -1,
   channels: [], channelsFetched: false, collections: null, page: 'Home', query: '',
   group: null, currentId: null, playQueue: [], queueSource: [], shuffle: false, repeat: 'off', modal: null, drawer: false, queueLimit: 50, limit: 100,
   loadingLibrary: false, busy: false, authPending: false, authError: '', serverUnavailable: false, notice: '',
@@ -215,10 +215,11 @@ function content() {
   return playlistPage();
 }
 function webLogin() {
+  if (!state.registrationOpen) state.accountMode = 'login';
   if (state.multiuser) return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">YOUR MUSIC, YOUR ACCOUNT</div>
     <h1>${state.accountMode === 'register' ? 'Create your account.' : 'Welcome back.'}</h1><p>${state.accountMode === 'register' ? 'Create a private web account, then connect your own Telegram account and choose your music channel.' : 'Sign in to your web account to reach your Telegram library.'}</p>
     <form id="web-account-form"><input id="web-username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_]+" placeholder="Username" aria-label="Username" autocomplete="username" required><input id="web-password" type="password" minlength="12" placeholder="Password" aria-label="Password" autocomplete="${state.accountMode === 'register' ? 'new-password' : 'current-password'}" required><button class="pill" type="submit">${state.accountMode === 'register' ? 'Create account' : 'Sign in'}</button></form>
-    <button class="text-link account-switch" data-action="account-mode">${state.accountMode === 'register' ? 'Already have an account? Sign in' : 'New here? Create an account'}</button></div>`;
+    ${state.registrationOpen ? `<button class="text-link account-switch" data-action="account-mode">${state.accountMode === 'register' ? 'Already have an account? Sign in' : 'New here? Create an account'}</button>` : '<p class="auth-hint">New accounts are currently closed. Ask the server owner for access.</p>'}</div>`;
   return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">PRIVATE WEB PLAYER</div>
     <h1>Your music, anywhere.</h1><p>Enter the sharing password set on the Windows computer hosting Telopotify.</p>
     <form id="web-login-form"><input id="web-password" type="password" placeholder="Sharing password" aria-label="Sharing password" autocomplete="current-password" required><button class="pill" type="submit">Unlock</button></form></div>`;
@@ -549,6 +550,7 @@ async function start() {
       state.remote = true;
       const details = await session.json();
       state.multiuser = Boolean(details.multiuser);
+      state.registrationOpen = Boolean(details.registrationOpen);
       state.webAuthenticated = Boolean(details.authenticated);
       if (state.webAuthenticated) await refreshStatus(true); else render();
     } else {

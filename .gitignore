@@ -2,8 +2,24 @@
 .env
 .env.*
 !.env.example
+.npmrc
+.netrc
+id_rsa
+id_ed25519
+secrets/
 *.session
 *.session-journal
+*.db
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+*.mobileprovision
+*.keystore
+*.jks
 tdlib-data/
 tdlib-files/
 local-data/
@@ -21,6 +37,11 @@ coverage/
 .vscode/
 *.log
 .bundle/
+*.lnk
+*.ipa
+*.apk
+*.aab
+*.xcarchive/
 
 # Local music used for playback experiments
 *.mp3
@@ -29,6 +50,3 @@ coverage/
 *.flac
 *.ogg
 *.wav
-
-# Local Android development signing key
-TelopotifyApp/android/app/debug.keystore
