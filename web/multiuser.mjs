@@ -7,6 +7,9 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { AccountStore } from './accounts.mjs';
 import { relayEnabled, startTelegramRelay } from './telegram-relay-local.mjs';
+import {AttemptLimiter, clientAddress, trustedProxyAddresses} from './rate-limit.mjs';
+import {BridgePool, bridgeLimits} from './bridge-pool.mjs';
+import {telegramCredentials} from '../spikes/telegram-client/credentials.mjs';
 
 const files = new Map([
   ['/web', [resolve('web/index.html'), 'text/html; charset=utf-8']],
@@ -78,7 +81,10 @@ async function sessionKeyFor(dataDir) {
 
 export async function createMultiuserServer({dataDir = resolve('local-data/web-accounts'),
   bridgeScript = resolve('spikes/telegram-client/library-server.mjs'), sessionKey: suppliedSessionKey,
-  allowSignups = process.env.TELOPOTIFY_ALLOW_SIGNUPS === '1'} = {}) {
+  allowSignups = process.env.TELOPOTIFY_ALLOW_SIGNUPS === '1',
+  trustedProxies = trustedProxyAddresses(process.env.TELOPOTIFY_TRUSTED_PROXIES),
+  limiter = new AttemptLimiter(), poolOptions = bridgeLimits(), startBridge: suppliedStartBridge,
+  cleanupIntervalMs = 60_000} = {}) {
   const sessionKey = suppliedSessionKey ? validSessionKey(suppliedSessionKey) : await sessionKeyFor(dataDir);
   const store = new AccountStore(resolve(dataDir, 'accounts.json'));
   await store.load();
@@ -87,73 +93,110 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
     await startTelegramRelay(relayUrl, process.env.TELOPOTIFY_RELAY_TOKEN) : null;
   const relayPort = relay?.address().port;
   const sessions = new Map();
-  const failures = new Map();
-  const bridges = new Map();
   const accountFor = request => {
     const key = request.headers.cookie?.match(/(?:^|;\s*)telopotify_account=([a-f0-9]{64})(?:;|$)/)?.[1];
     const session = key && sessions.get(key);
     if (!session) return null;
-    if (session.expires < Date.now()) { sessions.delete(key); return null; }
+    if (session.expires <= Date.now() || session.sessionVersion !== store.sessionVersion(session.id)) {
+      sessions.delete(key); return null;
+    }
     return session;
   };
-  async function bridgeFor(accountId) {
-    if (bridges.has(accountId)) return bridges.get(accountId).ready;
-    const entry = {child: null, ready: null};
-    bridges.set(accountId, entry);
-    entry.ready = (async () => {
-      const userDir = resolve(dataDir, 'users', accountId);
-      await mkdir(userDir, {recursive: true});
-      const connectionFile = resolve(userDir, 'bridge-connection.json');
-      await unlink(connectionFile).catch(error => { if (error.code !== 'ENOENT') throw error; });
-      const child = spawn(process.execPath, [bridgeScript], {
-        cwd: resolve('.'), windowsHide: true, stdio: 'ignore',
-        env: {...process.env, TELOPOTIFY_DATA_DIR: userDir, TELOPOTIFY_BRIDGE_PORT: '0',
-          TELOPOTIFY_SESSION_KEY: sessionKey,
-          TELOPOTIFY_SOCKS_PORT: relayPort ? String(relayPort) : ''},
+  const invalidateSessions = id => {
+    for (const [key, session] of sessions) if (session.id === id) sessions.delete(key);
+  };
+  const issueSession = account => {
+    const secret = randomBytes(32).toString('hex');
+    sessions.set(secret, {...account, expires: Date.now() + lifetime});
+    // Never keep a one-time recovery code inside session state.
+    delete sessions.get(secret).recoveryCode;
+    return cookie(secret, lifetime / 1000);
+  };
+  function limited(request, response, action, username) {
+    const keys = [`${action}:ip:${clientAddress(request, trustedProxies)}`];
+    if (username !== undefined) keys.push(`${action}:user:${String(username).trim().toLowerCase().slice(0, 32)}`);
+    for (const key of keys) {
+      const retry = limiter.take(key);
+      if (retry) {
+        send(response, 429, {error: 'Too many attempts. Please wait before trying again.'}, {'Retry-After': retry});
+        return true;
+      }
+    }
+    return false;
+  }
+  async function startBridge(accountId, onExit) {
+    const userDir = resolve(dataDir, 'users', accountId);
+    await mkdir(userDir, {recursive: true});
+    const connectionFile = resolve(userDir, 'bridge-connection.json');
+    await unlink(connectionFile).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    const child = spawn(process.execPath, [bridgeScript], {
+      cwd: resolve('.'), windowsHide: true, stdio: 'ignore',
+      env: {...process.env, TELOPOTIFY_DATA_DIR: userDir, TELOPOTIFY_BRIDGE_PORT: '0',
+        TELOPOTIFY_SESSION_KEY: sessionKey,
+        TELOPOTIFY_SOCKS_PORT: relayPort ? String(relayPort) : ''},
+    });
+    let spawnError = null;
+    let exited = false;
+    const stopped = new Promise(done => {
+      child.on('error', error => {
+        spawnError = error;
+        if (!child.pid) { exited = true; onExit(); done(); }
       });
-      entry.child = child;
-      let spawnError = null;
-      child.on('error', error => { spawnError = error; if (bridges.get(accountId) === entry) bridges.delete(accountId); });
-      child.on('exit', () => { if (bridges.get(accountId) === entry) bridges.delete(accountId); });
+      child.on('exit', () => { exited = true; onExit(); done(); });
+    });
+    const stop = async () => {
+      if (!exited && !child.kill()) throw new Error('Telegram service could not stop');
+      await stopped;
+    };
+    try {
       for (let attempt = 0; attempt < 150; attempt++) {
         if (spawnError) throw new Error('Telegram service could not start');
-        if (child.exitCode !== null) throw new Error('Telegram service stopped');
+        if (exited) throw new Error('Telegram service stopped');
         try {
           const saved = JSON.parse(await readFile(connectionFile, 'utf8'));
           const address = new URL(saved.address);
           if (address.protocol !== 'http:' || address.hostname !== '127.0.0.1' ||
               !address.searchParams.get('token')) throw new Error('Invalid Telegram service address');
-          return address;
-        } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          return {address, stop};
+        } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
         await new Promise(done => setTimeout(done, 100));
       }
-      child.kill();
       throw new Error('Telegram service did not start');
-    })();
-    entry.ready.catch(() => { if (bridges.get(accountId) === entry) bridges.delete(accountId); });
-    return entry.ready;
+    } catch (error) { await stop(); throw error; }
   }
+  const pool = new BridgePool(suppliedStartBridge || startBridge, poolOptions);
+  const cleanupTimer = setInterval(() => {
+    for (const [key, session] of sessions) if (session.expires <= Date.now()) sessions.delete(key);
+    pool.cleanup().catch(() => {});
+  }, cleanupIntervalMs);
+  cleanupTimer.unref();
   async function proxy(request, response, url, accountId) {
-    const address = await bridgeFor(accountId);
-    const target = new URL(url.pathname + url.search, address.origin);
-    target.searchParams.set('token', address.searchParams.get('token'));
-    const headers = {};
-    if (request.headers.range) headers.range = request.headers.range;
-    if (request.headers['content-type']) headers['content-type'] = request.headers['content-type'];
-    const abort = new AbortController();
-    response.on('close', () => abort.abort());
-    const upstream = await fetch(target, {method: request.method, headers,
-      body: request.method === 'POST' ? JSON.stringify(await bodyOf(request)) : undefined,
-      signal: abort.signal});
-    const outgoing = {'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer'};
-    for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges',
-      'cache-control', 'x-content-type-options']) {
-      const value = upstream.headers.get(name);
-      if (value) outgoing[name] = value;
-    }
-    response.writeHead(upstream.status, outgoing);
-    if (request.method === 'HEAD' || !upstream.body) { response.end(); return; }
-    Readable.fromWeb(upstream.body).on('error', () => response.destroy()).pipe(response);
+    const lease = await pool.acquire(accountId);
+    const {address} = lease;
+    response.once('finish', lease.release);
+    response.once('close', lease.release);
+    if (response.destroyed) { lease.release(); return; }
+    try {
+      const target = new URL(url.pathname + url.search, address.origin);
+      target.searchParams.set('token', address.searchParams.get('token'));
+      const headers = {};
+      if (request.headers.range) headers.range = request.headers.range;
+      if (request.headers['content-type']) headers['content-type'] = request.headers['content-type'];
+      const abort = new AbortController();
+      response.on('close', () => abort.abort());
+      const upstream = await fetch(target, {method: request.method, headers,
+        body: request.method === 'POST' ? JSON.stringify(await bodyOf(request)) : undefined,
+        signal: abort.signal});
+      const outgoing = {'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer'};
+      for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges',
+        'cache-control', 'x-content-type-options']) {
+        const value = upstream.headers.get(name);
+        if (value) outgoing[name] = value;
+      }
+      response.writeHead(upstream.status, outgoing);
+      if (request.method === 'HEAD' || !upstream.body) { response.end(); return; }
+      Readable.fromWeb(upstream.body).on('error', () => response.destroy()).pipe(response);
+    } catch (error) { lease.release(); throw error; }
   }
   const server = createServer(async (request, response) => {
     try {
@@ -178,34 +221,58 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
       if (request.method === 'POST' && !sameOrigin(request)) {
         send(response, 403, {error: 'Invalid request origin'}); return;
       }
+      if (url.pathname === '/web/recover' && request.method === 'POST') {
+        if (limited(request, response, 'recover')) return;
+        const {username, recoveryCode, newPassword} = await bodyOf(request);
+        const retry = limiter.take(`recover:user:${String(username || '').trim().toLowerCase().slice(0, 32)}`);
+        if (retry) { send(response, 429, {error: 'Too many attempts. Please wait before trying again.'}, {'Retry-After': retry}); return; }
+        const account = await store.recover(username, recoveryCode, newPassword);
+        if (!account) { send(response, 400, {error: 'Incorrect username or recovery code'}); return; }
+        invalidateSessions(account.id);
+        send(response, 200, {authenticated: false, recoveryCode: account.recoveryCode},
+          {'Set-Cookie': cookie('', 0)}); return;
+      }
       if (request.method === 'POST' && ['/web/register', '/web/login'].includes(url.pathname)) {
         if (url.pathname === '/web/register' && !allowSignups) {
           send(response, 403, {error: 'Account registration is closed. Ask the server owner to enable it.'}); return;
         }
-        const key = request.socket.remoteAddress || 'unknown';
-        const recent = (failures.get(key) || []).filter(time => time > Date.now() - 15 * 60_000);
-        if (recent.length >= 12) { send(response, 429, {error: 'Too many attempts. Try later.'}); return; }
+        if (limited(request, response, 'login')) return;
         let account;
         try {
           const {username, password} = await bodyOf(request);
+          const retry = limiter.take(`login:user:${String(username || '').trim().toLowerCase().slice(0, 32)}`);
+          if (retry) { send(response, 429, {error: 'Too many attempts. Please wait before trying again.'}, {'Retry-After': retry}); return; }
           account = url.pathname === '/web/register' ? await store.register(username, password) :
             await store.verify(username, password);
         } catch (error) {
-          failures.set(key, [...recent, Date.now()]);
+          if (error.code || error instanceof SyntaxError) throw error;
           send(response, 400, {error: error.message}); return;
         }
         if (!account) {
-          failures.set(key, [...recent, Date.now()]);
           send(response, 401, {error: 'Incorrect username or password'}); return;
         }
-        failures.delete(key);
-        const secret = randomBytes(32).toString('hex');
-        sessions.set(secret, {id: account.id, username: account.username, expires: Date.now() + lifetime});
-        send(response, 200, {authenticated: true}, {'Set-Cookie': cookie(secret, lifetime / 1000)});
+        if (account.sessionVersion !== store.sessionVersion(account.id)) {
+          send(response, 409, {error: 'Account credentials changed. Please sign in again.'}); return;
+        }
+        send(response, 200, {authenticated: true, ...(account.recoveryCode ? {recoveryCode: account.recoveryCode} : {})},
+          {'Set-Cookie': issueSession(account)});
         return;
       }
       const session = accountFor(request);
       if (!session) { send(response, 401, {error: 'Sign in to your web account first'}); return; }
+      if (request.method === 'POST' && ['/web/password', '/web/recovery-code'].includes(url.pathname)) {
+        if (limited(request, response, 'confirm', session.username)) return;
+        const {currentPassword, newPassword} = await bodyOf(request);
+        const result = url.pathname === '/web/password' ?
+          await store.changePassword(session.id, currentPassword, newPassword) :
+          await store.replaceRecovery(session.id, currentPassword);
+        if (!result) { send(response, 403, {error: 'Current password is incorrect'}); return; }
+        if (url.pathname === '/web/password') {
+          invalidateSessions(session.id);
+          send(response, 200, {authenticated: true}, {'Set-Cookie': issueSession(result)});
+        } else send(response, 200, result);
+        return;
+      }
       if (url.pathname === '/web/logout' && request.method === 'POST') {
         const key = request.headers.cookie.match(/telopotify_account=([a-f0-9]{64})/)?.[1];
         if (key) sessions.delete(key);
@@ -217,19 +284,25 @@ export async function createMultiuserServer({dataDir = resolve('local-data/web-a
       }
       await proxy(request, response, url, session.id);
     } catch (error) {
-      if (!response.headersSent) send(response, 502, {error: 'Service unavailable. Try again shortly.'});
+      const malformed = error instanceof SyntaxError;
+      const inputError = malformed || /^(Expected JSON|Request is too large|Password must be)/.test(error.message);
+      if (!response.headersSent) send(response, inputError ? 400 : error.status || 502,
+        {error: malformed ? 'Invalid JSON request' : inputError || error.status === 503 ? error.message : 'Service unavailable. Try again shortly.'},
+        error.status === 503 ? {'Retry-After': '30'} : {});
       else response.destroy();
-      console.error('Web account request failed:', error.message);
+      if (!inputError) console.error('Web account request failed:', error.code || 'SERVICE_ERROR');
     }
   });
   server.on('close', () => {
-    for (const {child} of bridges.values()) child?.kill();
+    clearInterval(cleanupTimer);
+    pool.close().catch(() => {});
     relay?.close();
   });
   return server;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  telegramCredentials();
   const server = await createMultiuserServer();
   const {host, port} = webListenAddress();
   server.listen(port, host, () => {
@@ -237,6 +310,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(`Telegram relay: ${relayEnabled(process.env.TELOPOTIFY_RELAY_ENABLED,
       process.env.TELOPOTIFY_RELAY_URL) ? 'on' : 'off'}`);
     console.log(`New account registration: ${process.env.TELOPOTIFY_ALLOW_SIGNUPS === '1' ? 'on' : 'off'}`);
-    console.log('Use HTTPS to expose port 43129; the Telegram API credentials here remain test-only.');
+    console.log('Invite-only development beta. Use HTTPS for remote access.');
   });
+  const shutdown = () => { server.closeAllConnections(); server.close(); };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }

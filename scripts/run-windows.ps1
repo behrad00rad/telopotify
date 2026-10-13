@@ -50,6 +50,12 @@ function Test-Metro {
 
 $address = Get-BridgeAddress
 if (-not $address) {
+  $telegramApiId = 0L
+  if (-not [long]::TryParse($env:TELOPOTIFY_API_ID, [ref]$telegramApiId) -or
+      $telegramApiId -lt 1 -or $telegramApiId -gt 2147483647 -or
+      $env:TELOPOTIFY_API_HASH -notmatch '^[a-fA-F0-9]{32}$') {
+    throw 'Configure TELOPOTIFY_API_ID and TELOPOTIFY_API_HASH from your Telegram application before starting.'
+  }
   Write-Host 'Starting the local Telegram bridge...'
   Start-Process -FilePath (Get-Command node.exe).Source `
     -ArgumentList 'spikes/telegram-client/library-server.mjs' `

@@ -8,11 +8,9 @@ import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseRange } from '../range-stream/range.mjs';
 import { CHUNK_BYTES, readTelegramRange } from './chunks.mjs';
+import {telegramCredentials} from './credentials.mjs';
 
-// Public TEST ONLY credentials from Telegram Desktop's source documentation.
-// They are intentionally limited and must not be used in a distributed app.
-const API_ID = 17349;
-const API_HASH = '344583e45741c457fe1862106095a5eb';
+const {apiId: API_ID, apiHash: API_HASH} = telegramCredentials();
 const SESSION_PATH = resolve('local-data/telegram.session');
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });

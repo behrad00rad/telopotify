@@ -47,6 +47,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
       - name: Build unsigned iPhone app
+        env:
+          TELOPOTIFY_API_ID: ${{ secrets.TELOPOTIFY_API_ID }}
+          TELOPOTIFY_API_HASH: ${{ secrets.TELOPOTIFY_API_HASH }}
         run: |
           xcodebuild \
             -workspace TelopotifyApp/ios/TelopotifyApp.xcworkspace \
@@ -56,6 +59,8 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/telopotify-iphone" \
             CODE_SIGNING_ALLOWED=NO \
+            TELOPOTIFY_API_ID="$TELOPOTIFY_API_ID" \
+            TELOPOTIFY_API_HASH="$TELOPOTIFY_API_HASH" \
             build
       - name: Package IPA for local signing
         run: |

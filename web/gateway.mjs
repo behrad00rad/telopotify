@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import {AttemptLimiter, clientAddress, trustedProxyAddresses} from './rate-limit.mjs';
 
 const PORT = 43128;
 const files = new Map([
@@ -16,8 +17,6 @@ const files = new Map([
 const apiPaths = new Set(['/status', '/reconnect', '/auth/start', '/auth/input', '/auth/cancel',
   '/channels', '/channels/select', '/library', '/library/sync', '/collections']);
 const hash = value => createHash('sha256').update(value).digest();
-const sessions = new Map();
-const failures = new Map();
 const sessionLifetime = 7 * 24 * 60 * 60 * 1000;
 
 function send(response, status, body, headers = {}) {
@@ -26,7 +25,7 @@ function send(response, status, body, headers = {}) {
     'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer', ...headers});
   response.end(JSON.stringify(body));
 }
-function sessionFor(request) {
+function sessionFor(request, sessions) {
   const raw = request.headers.cookie?.match(/(?:^|;\s*)telopotify_web=([a-f0-9]{64})(?:;|$)/)?.[1];
   if (!raw) return null;
   const expiry = sessions.get(raw);
@@ -77,11 +76,13 @@ async function proxy(request, response, url) {
   if (request.method === 'HEAD' || !upstream.body) { response.end(); return; }
   Readable.fromWeb(upstream.body).on('error', () => response.destroy()).pipe(response);
 }
-export function createGateway(password) {
+export function createGateway(password, {trustedProxies = trustedProxyAddresses(process.env.TELOPOTIFY_TRUSTED_PROXIES),
+  limiter = new AttemptLimiter({limit: 8})} = {}) {
   if (typeof password !== 'string' || password.length < 16) {
     throw new Error('Set TELOPOTIFY_WEB_PASSWORD to at least 16 characters');
   }
   const expected = hash(password);
+  const sessions = new Map();
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
@@ -98,30 +99,27 @@ export function createGateway(password) {
         response.end(bytes); return;
       }
       if (url.pathname === '/web/session' && request.method === 'GET') {
-        send(response, 200, {remote: true, authenticated: Boolean(sessionFor(request))}); return;
+        send(response, 200, {remote: true, authenticated: Boolean(sessionFor(request, sessions))}); return;
       }
       if (request.method === 'POST' && !sameOrigin(request)) {
         send(response, 403, {error: 'Invalid request origin'}); return;
       }
       if (url.pathname === '/web/login' && request.method === 'POST') {
-        const key = request.socket.remoteAddress || 'unknown';
-        const recent = (failures.get(key) || []).filter(time => time > Date.now() - 15 * 60 * 1000);
-        if (recent.length >= 8) { send(response, 429, {error: 'Too many attempts. Try again later.'}); return; }
+        const retry = limiter.take(clientAddress(request, trustedProxies));
+        if (retry) { send(response, 429, {error: 'Too many attempts. Try again later.'}, {'Retry-After': retry}); return; }
         const body = await bodyOf(request);
         const value = JSON.parse(body).password;
         const provided = hash(typeof value === 'string' ? value : '');
         if (!timingSafeEqual(expected, provided)) {
-          failures.set(key, [...recent, Date.now()]);
           send(response, 401, {error: 'Incorrect password'}); return;
         }
-        failures.delete(key);
         const session = randomBytes(32).toString('hex');
         sessions.set(session, Date.now() + sessionLifetime);
         send(response, 200, {authenticated: true}, {'Set-Cookie':
           `telopotify_web=${session}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${sessionLifetime / 1000}`});
         return;
       }
-      const session = sessionFor(request);
+      const session = sessionFor(request, sessions);
       if (!session) { send(response, 401, {error: 'Sign in to the web player first'}); return; }
       if (url.pathname === '/web/logout' && request.method === 'POST') {
         sessions.delete(session);
@@ -136,7 +134,7 @@ export function createGateway(password) {
     } catch (error) {
       if (!response.headersSent) send(response, 502, {error: 'Service unavailable. Try again shortly.'});
       else response.destroy();
-      console.error('Web gateway request failed:', error.message);
+      console.error('Web gateway request failed:', error.code || 'SERVICE_ERROR');
     }
   });
 }

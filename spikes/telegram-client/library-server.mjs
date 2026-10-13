@@ -15,10 +15,9 @@ import { mergeRecentTracks, parseLibraryCache } from './library-cache.mjs';
 import { createAuthFlow } from './auth-flow.mjs';
 import { readSession, removeSession, saveSession } from './session-store.mjs';
 import { restoreDelay, shouldRetryRestore } from './restore-policy.mjs';
+import {telegramCredentials} from './credentials.mjs';
 
-// Public test-only credentials from Telegram Desktop. Never ship these in an app.
-const API_ID = Number(process.env.TELOPOTIFY_API_ID || 17349);
-const API_HASH = process.env.TELOPOTIFY_API_HASH || '344583e45741c457fe1862106095a5eb';
+const {apiId: API_ID, apiHash: API_HASH} = telegramCredentials();
 const DATA_DIR = resolve(process.env.TELOPOTIFY_DATA_DIR || 'local-data');
 const SESSION_PATH = resolve(DATA_DIR, 'telegram.session');
 const CONNECTION_PATH = resolve(DATA_DIR, 'bridge-connection.json');
@@ -641,7 +640,9 @@ async function main() {
     server.listen(BRIDGE_PORT, '127.0.0.1', done);
   });
   const address = `http://127.0.0.1:${server.address().port}?token=${token}`;
-  await writeFile(CONNECTION_PATH, JSON.stringify({ address }), { encoding: 'utf8', mode: 0o600 });
+  const connectionTemporary = `${CONNECTION_PATH}.${process.pid}.tmp`;
+  await writeFile(connectionTemporary, JSON.stringify({ address }), { encoding: 'utf8', mode: 0o600 });
+  await rename(connectionTemporary, CONNECTION_PATH);
   console.log(`Local bridge ready at http://127.0.0.1:${server.address().port}. The app connects automatically.`);
   console.log('Keep this terminal running. Ctrl+C stops the bridge.');
   restoreSession().catch(() => { initializing = false; console.warn('Could not restore Telegram session.'); });

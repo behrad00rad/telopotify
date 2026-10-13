@@ -40,8 +40,12 @@ resuming older history. TDLib's audio-file cache is trimmed to 512 MiB on
 startup and when returning to the app while playback is idle. Network changes
 reopen TDLib connections, and range requests retry while the VPN reconnects.
 Multi-song background playback and network recovery still need device testing.
-Telegram's public sample API credentials are only for development. A dedicated
-API ID/hash are required before distribution.
+Telegram API credentials are required build configuration. Set repository Actions
+secrets `TELOPOTIFY_API_ID` and `TELOPOTIFY_API_HASH` for the unsigned iPhone build,
+or supply the same names as local Xcode build settings. `Info.plist` passes them
+to TDLib; missing configuration produces a clear error. No test credentials are
+embedded in Swift source. Web passwords/recovery codes belong to the hosted
+web-account service and do not change this on-device Telegram login.
 
 ## Device acceptance checks
 

@@ -6,7 +6,7 @@
 
 The project includes a React Native Windows player, a native iPhone player, and a responsive web player. Windows and web use a Node.js Telegram service. The iPhone player connects to Telegram itself through TDLib and needs no desktop bridge.
 
-> **Status:** Working development software for personal use and a small trusted group. The web-account service is not hardened for open public registration. Included Telegram Desktop API credentials are **test-only**; use your own API ID and hash before distribution.
+> **Hosted app status: invite-only development beta.** Registration is closed by default. Use it with a small trusted group, HTTPS, and a correctly configured hosting proxy. Telegram API credentials are required configuration; no test credentials are embedded.
 
 Source code is available under the [MIT license](LICENSE). Repository visibility does not expose local Telegram sessions or account data; keep `local-data/`, signing files, and environment secrets out of Git. Publishing the source does **not** make the hosted web-account service ready for unrestricted public use.
 
@@ -26,10 +26,41 @@ Commands run from the **repository root** unless a section says to enter `Telopo
 
 - **Library:** Telegram login, channel selection, saved catalog, incremental new-post sync, search, recently added/played, artists, albums, liked songs, and playlists. The Windows/web bridge indexes up to 2,000 music messages per channel without downloading their audio.
 - **Playback:** On-demand byte-range streaming, seek, play/pause, queue, next/previous, shuffle, repeat, artwork, and a persistent Now Playing area. Windows also has native media controls, speed, sleep timer, and next-track preparation.
-- **Storage:** Encrypted/saved Telegram sessions, local collections, a bounded RAM stream cache, and optional selected-song offline downloads on Windows/web. The full channel is never downloaded automatically.
+- **Storage:** Encrypted/saved Telegram sessions, local collections, a bounded RAM stream cache, and optional selected-song offline downloads in the Windows app. The full channel is never downloaded automatically.
+- **Web accounts:** Password changes require the current password. One-time recovery codes replace email recovery; recovery signs out all existing web sessions while preserving Telegram sessions, libraries, and playlists.
 - **iPhone:** Native TDLib access, paged song loading, saved catalog and channel choice, local likes/playlists, and native background-audio and lock-screen integration.
 
 The interfaces are **not fully feature-identical**. The iPhone app is independent of the Windows/web bridge, and local collections do not automatically sync between them. Long-session iPhone background playback and network interruption handling still need broader real-device testing.
+
+| Capability | Windows | Web | Native iPhone |
+| --- | --- | --- | --- |
+| Telegram connection | Local Node bridge | Hosted Node bridge per web account, or shared local bridge | TDLib directly on device |
+| Catalog | Newest 2,000 music messages | Newest 2,000 music messages | Pages through channel history; no shared 2,000-message cap |
+| Playback | Native Windows media player and system controls | Browser audio; background behavior depends on the browser/OS | Native AVPlayer, background audio and lock-screen controls |
+| Extra controls | Speed, sleep timer, selected-song offline downloads | Queue, shuffle, repeat; no offline-download UI | Native queue, shuffle and repeat; TDLib cache |
+| Artwork/albums | Telegram covers, external fallback, local album overrides | Telegram covers and external fallback; local album overrides | Telegram thumbnails and `Album:` captions |
+| Accounts/collections | Local Windows data | Web-password/recovery system only in `web:accounts`; per-user server data | On-device Telegram session and collections; no web-password system |
+
+The Android directory is an unvalidated scaffold, not a supported release. The browser version cannot promise uninterrupted iPhone background playback; use the native iPhone build for that path.
+
+## Screenshots
+
+Actual screens from the running responsive **web app**, captured at 1600 × 1000 on desktop and 430 pixels wide on mobile. The mobile views below are browser UI, not screenshots of the native iPhone build.
+
+![Desktop home with the Telegram music library and sticky playback controls](docs/screenshots/web-desktop-home.jpg)
+
+| Mobile Now Playing | Mobile queue drawer |
+| --- | --- |
+| <img src="docs/screenshots/web-mobile-now-playing.jpg" alt="Mobile web player with album artwork, seeking, shuffle and repeat" width="300"> | <img src="docs/screenshots/web-mobile-queue.jpg" alt="Mobile web queue drawer showing the current track and upcoming songs" width="300"> |
+
+<details>
+<summary>Desktop queue and Now Playing</summary>
+
+![Desktop queue drawer with the current track and upcoming songs](docs/screenshots/web-desktop-queue.jpg)
+
+![Desktop Now Playing dialog with album artwork and playback controls](docs/screenshots/web-desktop-now-playing.jpg)
+
+</details>
 
 ## Install
 
@@ -50,6 +81,8 @@ cd ..
 ```
 
 The web server does **not** require Visual Studio, Xcode, Android Studio, or `TelopotifyApp/node_modules`. It does use the checked-in logo from `TelopotifyApp/assets/`.
+
+Before starting any Telegram service, configure your [Telegram API ID and hash](#telegram-api-credentials) in the same terminal or hosting environment. Services now fail early with a configuration message if these are missing.
 
 ### Windows build tools
 
@@ -124,6 +157,26 @@ npm run web:accounts
 
 On Windows, the server creates an ignored `local-data/web-accounts/session.key` when the environment variable is absent. Preserve that file. Changing or losing the key makes saved Telegram sessions unreadable. Back up `local-data/web-accounts/` securely; Git ignores it. Web-account passwords are salted scrypt hashes. Web login cookies expire after seven days and clear on server restart, but saved Telegram sessions remain.
 
+### Web password and recovery
+
+- **Account → Change password** requires the current web password. Other web sessions are signed out; the requesting browser gets a new session. Your Telegram password is unaffected.
+- On registration, save the generated recovery code in a password manager. It is shown once and requires a save acknowledgement. The server stores only a SHA-256 hash of the 192-bit random code.
+- Existing users can choose **Account → Generate replacement code**, confirming their current password. This immediately replaces the old code. Account settings also remain accessible during Telegram setup or a music-service connection failure.
+- **Forgot password?** takes your username, saved recovery code, and a new web password. Each code works once. Save the replacement code shown after recovery, then sign in. All old web sessions are invalidated; your account ID, Telegram session, library and playlists are preserved.
+- There is no email recovery. If you lose both your password and recovery code, self-service recovery is unavailable. Reloading a code screen before saving it loses that display; a signed-in user can generate another after password confirmation.
+
+### Hosting proxy and process limits
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TELOPOTIFY_TRUSTED_PROXIES` | Empty | Comma-separated **exact IP addresses** of your trusted proxy hops; no wildcards or CIDR ranges |
+| `TELOPOTIFY_MAX_BRIDGES` | `8` | Maximum per-user Telegram processes, including processes still starting |
+| `TELOPOTIFY_BRIDGE_IDLE_MINUTES` | `15` | Stop a bridge after this many idle minutes; checked every minute |
+
+Forwarded client IPs are ignored unless the immediate peer is explicitly trusted. For a local Nginx proxy or Cloudflare Tunnel connector, set `TELOPOTIFY_TRUSTED_PROXIES=127.0.0.1,::1` **only if that proxy supplies a trustworthy `X-Forwarded-For` chain**. Walks through the chain stop at the first untrusted hop. Your proxy must overwrite or correctly append client IPs, preserve the original `Host`, and block direct public access to the Node port. Do not trust arbitrary internet peers or blindly accept `CF-Connecting-IP`; the app reads only `X-Forwarded-For` from configured proxies. This keeps unrelated remote clients from sharing the proxy's login/recovery lockout and prevents direct clients from choosing their own IP. Attempts are also limited per username; `429` responses include `Retry-After`.
+
+Ongoing requests and audio streams hold a bridge slot until they finish or disconnect. Idle cleanup preserves saved data and never evicts a bridge with an active request. A closed bridge restarts on the next request. If all slots are occupied, new users receive a retryable `503` instead of interrupting another user's playback. An open browser polls the service, so a tab still being used keeps its bridge alive. These controls assume one Node account-server instance using the data directory; do not run multiple instances against the same account files.
+
 For internet hosting, run Node with a process manager so it restarts after a crash or reboot, use persistent storage, and route a dedicated HTTPS hostname to port 43129. A separate host/domain can keep Telopotify apart from an existing website. This is still development software intended for a trusted group; registration must be explicitly enabled, and a fully public service needs further operational security review.
 
 ### GitHub Codespaces: web-only test
@@ -174,7 +227,7 @@ cd ..
 npm run ios
 ```
 
-The GitHub workflow is the build path when you have no Mac. Long background sessions, lock-screen controls, VPN changes, and interruptions still need extended listening tests. The iPhone module currently embeds the same test-only Telegram API credentials.
+The GitHub workflow is the build path when you have no Mac. Long background sessions, lock-screen controls, VPN changes, and interruptions still need extended listening tests. Add repository Actions secrets named `TELOPOTIFY_API_ID` and `TELOPOTIFY_API_HASH` before building a usable iPhone IPA. Compile-only simulator/fork PR builds can succeed without them, but unconfigured apps cannot sign in.
 
 The iOS bundle identifier is `com.behrad00rad.telopotify`. It replaces the React Native template identifier in both Debug and Release. Installing this build alongside an older build with the template identifier creates a separate app; app-private Telegram data does not transfer automatically. A **paid Apple Developer Program membership** is required to register the identifier, create the App Store Connect app record, and distribute through TestFlight. The current GitHub workflow builds an unsigned IPA; signing and TestFlight upload are not configured yet.
 
@@ -223,7 +276,20 @@ Artwork loads lazily: Telegram thumbnail first, then MusicBrainz and Cover Art A
 
 ### Telegram API credentials
 
-The project uses [Telegram Desktop's published test credentials](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/api_credentials.md), because app registration at [my.telegram.org/apps](https://my.telegram.org/apps) returned a generic `ERROR` during development. For release, follow [Telegram's API ID instructions](https://core.telegram.org/api/obtaining_api_id) and use your own credentials. The Node bridge reads `TELOPOTIFY_API_ID` and `TELOPOTIFY_API_HASH`; the iPhone module still contains test credentials in `TelopotifyApp/ios/TelopotifyApp/TelopotifyTelegram.swift` and needs a production credential path before distribution.
+Create your application at [my.telegram.org/apps](https://my.telegram.org/apps), following [Telegram's API ID instructions](https://core.telegram.org/api/obtaining_api_id). The Node bridge, interactive probe, and hosted account-server startup require both variables; they have no fallback credentials:
+
+```powershell
+# PowerShell; substitute your own values locally. Never commit them.
+$env:TELOPOTIFY_API_ID = 'your-numeric-api-id'
+$env:TELOPOTIFY_API_HASH = 'your-32-character-api-hash'
+npm run web:accounts
+```
+
+On Linux/macOS use `export TELOPOTIFY_API_ID='...'` and `export TELOPOTIFY_API_HASH='...'`. The Windows launcher inherits them from its terminal and checks configuration before starting a new bridge. Environment files are not loaded automatically; use hosting secrets or your process manager.
+
+For iOS, the API values come from Xcode build settings of the same names, substituted into `Info.plist`. The unsigned-iPhone workflow supplies them from Actions secrets. On a local Mac, pass `TELOPOTIFY_API_ID="$TELOPOTIFY_API_ID" TELOPOTIFY_API_HASH="$TELOPOTIFY_API_HASH"` to your `xcodebuild` invocation, or set private user-defined Xcode build settings. A built native app necessarily contains its API values; they are application identifiers, not a replacement for protecting Telegram user sessions. Runtime configuration errors never include the credential values.
+
+Earlier Git history contains Telegram Desktop's publicly documented test credentials. They were removed from current runnable code; history was inspected and left intact. No accidentally committed personal credentials or session files were identified by the tracked-file/history pattern review. See [the security review](docs/security-review.md) for the scope and limits of that check.
 
 If the app form fails, check whether the account already has an app, try a unique alphanumeric short name, and retry in a fresh browser session. These are diagnostic attempts, not a confirmed fix. Do not share login details or repeatedly submit the form.
 
@@ -236,7 +302,10 @@ If the app form fails, check whether the account already has an app, try a uniqu
 | Web loads but playback fails | Keep its Node service running and inspect its terminal output. The one-library player also needs the bridge. |
 | Web account forgets Telegram login | Preserve `local-data/web-accounts/` and the same `TELOPOTIFY_SESSION_KEY`. The web-account login itself must be repeated after a server restart. |
 | Relay is on but Telegram still fails | Check VPS-to-Worker WSS access, URL, matching tokens, and Worker deployment. Compare with `TELOPOTIFY_RELAY_ENABLED=0` after restarting. |
-| Codespace URL is inaccessible to others | Make port 43129 public in Ports, knowing that signup then becomes publicly reachable. |
+| Codespace URL is inaccessible to others | A private forwarded port requires GitHub login. Making it public exposes the beta login page; registration remains closed unless explicitly enabled. |
+| Login/recovery returns `429` for unrelated users | Check your explicit trusted-proxy list and the proxy's `X-Forwarded-For` chain; honor `Retry-After`. |
+| Music service returns `503` | All Telegram-process slots are occupied; wait for an idle slot or increase `TELOPOTIFY_MAX_BRIDGES` for your server capacity. |
+| Telegram service fails immediately after updating | Set your own `TELOPOTIFY_API_ID` and `TELOPOTIFY_API_HASH`; embedded test credentials were removed. |
 | iPhone IPA will not install | The CI IPA is unsigned; sign it with AltStore/AltServer or another Apple signing flow. |
 
 Development history and unfinished validation work: [TASKS.md](TASKS.md) · [TASK-01-FINDINGS.md](TASK-01-FINDINGS.md).

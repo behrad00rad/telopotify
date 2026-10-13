@@ -48,7 +48,8 @@ if(u.searchParams.get('token')!=='bridge-secret'){res.writeHead(401);res.end();r
 res.setHeader('Content-Type','application/json');res.end(JSON.stringify({folder,path:u.pathname,
 sessionKeyReady:Buffer.from(process.env.TELOPOTIFY_SESSION_KEY||'','base64').length===32}));});
 server.listen(0,'127.0.0.1',async()=>{await mkdir(folder,{recursive:true});
-await writeFile(resolve(folder,'bridge-connection.json'),JSON.stringify({address:'http://127.0.0.1:'+server.address().port+'?token=bridge-secret'}));});`);
+await writeFile(resolve(folder,'bridge-connection.json'),'{');
+setTimeout(async()=>{await writeFile(resolve(folder,'bridge-connection.json'),JSON.stringify({address:'http://127.0.0.1:'+server.address().port+'?token=bridge-secret'}));},150);});`);
   const server = await createMultiuserServer({dataDir: resolve(dir, 'accounts'), bridgeScript: mock,
     sessionKey: randomBytes(32).toString('base64'), allowSignups: true});
   server.listen(0, '127.0.0.1');

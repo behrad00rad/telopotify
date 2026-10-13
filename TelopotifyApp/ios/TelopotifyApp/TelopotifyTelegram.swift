@@ -68,6 +68,14 @@ final class TelopotifyTelegram: RCTEventEmitter {
   }
 
   private func configure() {
+    let settings = Bundle.main.infoDictionary ?? [:]
+    let apiHash = settings["TelopotifyTelegramAPIHash"] as? String ?? ""
+    guard let apiIDText = settings["TelopotifyTelegramAPIID"] as? String,
+          let apiID = Int(apiIDText), apiID > 0, apiID <= 2_147_483_647,
+          apiHash.range(of: "^[a-fA-F0-9]{32}$", options: .regularExpression) != nil else {
+      emitState(error: "Telegram API credentials are missing. Configure TELOPOTIFY_API_ID and TELOPOTIFY_API_HASH when building the app.")
+      return
+    }
     let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     let root = support.appendingPathComponent("Telegram", isDirectory: true)
     let files = root.appendingPathComponent("Files", isDirectory: true)
@@ -79,10 +87,9 @@ final class TelopotifyTelegram: RCTEventEmitter {
       emitState(error: "Could not prepare Telegram storage: \(error.localizedDescription)")
       return
     }
-    // Telegram Desktop's published test credentials. Replace before distribution.
     request([
-      "@type": "setTdlibParameters", "api_id": 17349,
-      "api_hash": "344583e45741c457fe1862106095a5eb",
+      "@type": "setTdlibParameters", "api_id": apiID,
+      "api_hash": apiHash,
       "database_directory": root.path, "files_directory": files.path,
       "database_encryption_key": "", "use_test_dc": false,
       "use_file_database": true, "use_chat_info_database": true,

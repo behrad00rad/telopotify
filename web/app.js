@@ -5,6 +5,7 @@ const navItems = [
   ['Albums', 'albums'], ['Liked', 'heart'], ['Playlists', 'playlists'],
 ];
 const state = {
+  username: '', recoveryCode: null, accountPending: false,
   token: '', remote: false, multiuser: false, registrationOpen: false, accountMode: 'login', webAuthenticated: true, status: null, tracks: [], channel: '', channelId: null, revision: -1,
   channels: [], channelsFetched: false, collections: null, page: 'Home', query: '',
   group: null, currentId: null, playQueue: [], queueSource: [], shuffle: false, repeat: 'off', modal: null, drawer: false, queueLimit: 50, limit: 100,
@@ -62,6 +63,7 @@ function clearWebSession() {
   state.modal = null; state.drawer = false;
   state.serverUnavailable = false; state.authError = ''; state.authPending = false;
   state.notice = '';
+  state.username = ''; state.recoveryCode = null;
 }
 function renderNotice() {
   const notice = $('#notice');
@@ -74,6 +76,7 @@ function renderStatus() {
   $('#sidebar-status').textContent = online ? 'Telegram connected' :
     state.status?.authenticated ? 'Telegram reconnecting' : 'Sign in to Telegram';
   $('#web-signout').hidden = !(state.remote && state.webAuthenticated);
+  $('#web-account').hidden = !(state.multiuser && state.webAuthenticated);
 }
 async function loadChannels() {
   state.channels = (await api('/channels')).channels;
@@ -183,7 +186,7 @@ function home() {
     ${[['Liked', state.collections?.favorites.length || 0, state.tracks.find(t => liked(idOf(t)))],
       ['Songs', state.tracks.length, state.tracks[0]], ['Playlists', state.collections?.playlists.length || 0, state.tracks[1]]]
       .map(([name, count, t]) => `<button class="quick-card" data-action="page" data-page="${name}">${art(t, 56)}<div><strong>${name === 'Songs' ? 'All songs' : name === 'Liked' ? 'Liked songs' : name}</strong><span>${count} ${name === 'Playlists' ? 'playlists' : 'songs'}</span></div></button>`).join('')}</div>`;
-  return `${heading('Welcome back', 'Home', `Listening from ${state.channel}`)}${hero}${quick}
+  return `${heading('Welcome back', 'Home', `Listening from ${state.channel}`)}${libraryLimit()}${hero}${quick}
     <div class="section-head"><h2>Recently added</h2><button class="text-link" data-action="page" data-page="Songs">View all</button></div>${trackList(state.tracks.slice(0, 8))}
     <div class="section-head"><h2>Artists</h2><button class="text-link" data-action="page" data-page="Artists">View all</button></div>${groupCards(groupsBy('Artists'), 'Artists', 6)}`;
 }
@@ -195,7 +198,7 @@ function playlistPage() {
 }
 function content() {
   if (state.remote && !state.webAuthenticated) return webLogin();
-  if (!state.status) return state.serverUnavailable ? `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">CONNECTION PROBLEM</div><h1>Music service unavailable.</h1><p>${esc(state.notice)}</p><button class="pill dark" data-action="retry-status">Try again</button></div>` : '<div class="loading">Connecting to your music…</div>';
+  if (!state.status) return `<div class="setup">${state.serverUnavailable ? `<div class="eyebrow">CONNECTION PROBLEM</div><h1>Music service unavailable.</h1><p>${esc(state.notice)}</p><button class="pill dark" data-action="retry-status">Try again</button>` : '<div class="loading">Connecting to your music…</div>'}${accountShortcut()}</div>`;
   if (!state.status.authenticated) return setup();
   if (!state.status.selected) return channelsPage();
   if (state.group) {
@@ -203,7 +206,7 @@ function content() {
     return `${heading(state.group.kind, state.group.name, `${songs.length} songs`, '<button class="small-button" data-action="back">Back</button>')}${trackList(filterTracks(songs))}`;
   }
   if (state.page === 'Home') return home();
-  if (state.page === 'Songs') return `${heading('Your channel', 'All songs', `${state.tracks.length} tracks · ${state.channel}`)}${trackList(filterTracks(state.tracks))}`;
+  if (state.page === 'Songs') return `${heading('Your channel', 'All songs', `${state.tracks.length} tracks · ${state.channel}`)}${libraryLimit()}${trackList(filterTracks(state.tracks))}`;
   if (state.page === 'Liked') {
     const songs = state.tracks.filter(t => liked(idOf(t)));
     return `${heading('Your library', 'Liked songs', `${songs.length} tracks`)}${trackList(filterTracks(songs))}`;
@@ -215,14 +218,24 @@ function content() {
   return playlistPage();
 }
 function webLogin() {
-  if (!state.registrationOpen) state.accountMode = 'login';
+  if (!state.registrationOpen && state.accountMode === 'register') state.accountMode = 'login';
+  if (state.multiuser && state.accountMode === 'recover') return `<div class="setup"><div class="eyebrow">ACCOUNT RECOVERY</div><h1>Reset your password.</h1><p>Use the recovery code you saved. It can be used once. After resetting, save the replacement code and sign in with your new password. Your library and playlists stay in place.</p>
+    <form id="web-recover-form" class="account-form"><input id="recover-username" maxlength="32" placeholder="Username" aria-label="Username" autocomplete="username" required><input id="recover-code" maxlength="100" placeholder="Recovery code" aria-label="Recovery code" autocomplete="off" required><input id="recover-password" type="password" minlength="12" maxlength="256" placeholder="New password" aria-label="New password" autocomplete="new-password" required><button class="pill" type="submit">Reset password</button></form><button class="text-link" data-action="account-login">Back to sign in</button></div>`;
   if (state.multiuser) return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">YOUR MUSIC, YOUR ACCOUNT</div>
+    <p>Invite-only development beta. Access is managed by the server owner.</p>
     <h1>${state.accountMode === 'register' ? 'Create your account.' : 'Welcome back.'}</h1><p>${state.accountMode === 'register' ? 'Create a private web account, then connect your own Telegram account and choose your music channel.' : 'Sign in to your web account to reach your Telegram library.'}</p>
-    <form id="web-account-form"><input id="web-username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_]+" placeholder="Username" aria-label="Username" autocomplete="username" required><input id="web-password" type="password" minlength="12" placeholder="Password" aria-label="Password" autocomplete="${state.accountMode === 'register' ? 'new-password' : 'current-password'}" required><button class="pill" type="submit">${state.accountMode === 'register' ? 'Create account' : 'Sign in'}</button></form>
+    <form id="web-account-form"><input id="web-username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9_]+" placeholder="Username" aria-label="Username" autocomplete="username" required><input id="web-password" type="password" minlength="12" maxlength="256" placeholder="Password" aria-label="Password" autocomplete="${state.accountMode === 'register' ? 'new-password' : 'current-password'}" required><button class="pill" type="submit">${state.accountMode === 'register' ? 'Create account' : 'Sign in'}</button></form>
+    <button class="text-link account-switch" data-action="account-recover">Forgot password?</button>
     ${state.registrationOpen ? `<button class="text-link account-switch" data-action="account-mode">${state.accountMode === 'register' ? 'Already have an account? Sign in' : 'New here? Create an account'}</button>` : '<p class="auth-hint">New accounts are currently closed. Ask the server owner for access.</p>'}</div>`;
   return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">PRIVATE WEB PLAYER</div>
     <h1>Your music, anywhere.</h1><p>Enter the sharing password set on the Windows computer hosting Telopotify.</p>
     <form id="web-login-form"><input id="web-password" type="password" placeholder="Sharing password" aria-label="Sharing password" autocomplete="current-password" required><button class="pill" type="submit">Unlock</button></form></div>`;
+}
+function libraryLimit() {
+  return '<p class="auth-hint library-limit">This library indexes the newest 2,000 music messages in your channel. Older songs are outside this limit; new posts replace the oldest indexed songs. Audio streams when you play it.</p>';
+}
+function accountShortcut() {
+  return state.multiuser && state.webAuthenticated ? '<p><button class="text-link" data-action="account-settings">Account settings</button> · <button class="text-link" data-action="web-logout">Sign out</button></p>' : '';
 }
 function setup() {
   const step = state.status.step;
@@ -238,6 +251,7 @@ function setup() {
       'Connecting to Telegram and waiting for its response…' : 'Connecting to Telegram…';
   return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">WELCOME TO TELOPOTIFY</div>
     <h1>Your music starts here.</h1><p>${state.multiuser ? 'Sign in to your Telegram account. This session and its music library belong only to your web account.' : state.remote ? 'Sign in through the private Telopotify service on the Windows PC.' : 'Sign in to Telegram on this computer.'} Songs stream as needed.</p>
+    ${accountShortcut()}
     ${hint && !state.authPending ? `<p class="auth-hint">${hint}</p><form id="auth-form"><input id="auth-value" ${step === 'password' ? 'type="password"' : step === 'phone' ? 'type="tel"' : 'type="text"'} placeholder="${prompt}" aria-label="${prompt}" autocomplete="off" required><button class="pill" type="submit">${step === 'phone' ? 'Send code' : 'Continue'}</button></form>` : `<p class="auth-activity" role="status">${activity}</p>`}
     ${state.status.authInProgress && !state.authPending ? '<button class="text-link auth-cancel" data-action="auth-cancel">Start over</button>' : ''}
     ${!state.authPending && (state.authError || state.status.error) ? `<p class="setup-error" role="alert">${esc(state.authError || state.status.error)}</p>` : ''}
@@ -245,7 +259,8 @@ function setup() {
 }
 function channelsPage() {
   return `<div class="setup"><img class="setup-logo" src="/web/logo.png" alt=""><div class="eyebrow">ONE MORE STEP</div><h1>Choose your channel.</h1>
-    <p>Select the channel that contains your music. Indexing reads song details without downloading all the audio.</p>
+    <p>Select your music channel. The newest 2,000 music messages are indexed; older songs are outside this limit. Indexing reads details without downloading all the audio.</p>
+    ${accountShortcut()}
     ${state.busy ? '<div class="loading">Indexing your songs…</div>' : state.channels.map(c =>
       `<button class="channel-choice" data-action="channel" data-index="${c.index}"><div class="art"><span class="placeholder">${esc(c.title.slice(0, 1))}</span></div><strong>${esc(c.title)}</strong>${icon('chevron')}</button>`).join('') || '<div class="loading">Looking for your channels…</div>'}
     <button class="text-link" data-action="channels-refresh">Refresh channels</button></div>`;
@@ -261,7 +276,15 @@ function renderPlayer() {
 }
 function renderModal() {
   const root = $('#modal-root');
+  if (state.recoveryCode) {
+    root.innerHTML = `<div class="modal-backdrop"><div class="dialog account-dialog" role="dialog" aria-modal="true" aria-label="Save your recovery code"><h2>Save your recovery code</h2><p>This code is shown once. Keep it in a password manager or another safe place. It resets your web password and can be used once. A replacement cancels your previous code. If you close or reload this page, it cannot be shown again.</p><input aria-label="Your new recovery code" class="recovery-code" type="text" readonly value="${esc(state.recoveryCode)}"><form id="recovery-saved-form"><label><input type="checkbox" required> I have saved my recovery code</label><button class="pill" type="submit">Continue</button></form></div></div>`;
+    return;
+  }
   if (!state.modal) { root.innerHTML = ''; return; }
+  if (state.modal.type === 'account') {
+    root.innerHTML = `<div class="modal-backdrop" data-action="close"><div class="dialog account-dialog" role="dialog" aria-modal="true" aria-label="Account settings">${button('close', 'Close', 'close', 'close')}<h2>Account settings</h2><p>${esc(state.username)} · Web account password</p><form id="change-password-form" class="account-form"><input name="currentPassword" type="password" maxlength="256" placeholder="Current password" aria-label="Current password" autocomplete="current-password" required><input name="newPassword" type="password" minlength="12" maxlength="256" placeholder="New password" aria-label="New password" autocomplete="new-password" required><button class="pill" type="submit">Change password</button></form><h3>Recovery code</h3><p>Confirm your password to generate a code. This replaces any previous code. There is no email recovery.</p><form id="replace-recovery-form" class="account-form"><input name="currentPassword" type="password" maxlength="256" placeholder="Current password" aria-label="Password to replace recovery code" autocomplete="current-password" required><button class="pill" type="submit">Generate replacement code</button></form><p class="setup-error" id="account-error" role="alert"></p></div></div>`;
+    return;
+  }
   if (state.modal.type === 'add') {
     const playlists = state.collections?.playlists || [];
     root.innerHTML = `<div class="modal-backdrop" data-action="close"><div class="dialog" role="dialog" aria-modal="true" aria-label="Add to playlist">
@@ -388,6 +411,8 @@ async function onAction(buttonEl) {
     clearWebSession(); render(); return;
   }
   if (action === 'account-mode') { state.accountMode = state.accountMode === 'login' ? 'register' : 'login'; state.notice = ''; render(); return; }
+  if (action === 'account-recover' || action === 'account-login') { state.accountMode = action === 'account-recover' ? 'recover' : 'login'; state.notice = ''; render(); return; }
+  if (action === 'account-settings') { state.modal = {type: 'account'}; renderModal(); return; }
   if (action === 'page') { state.page = buttonEl.dataset.page; state.group = null; state.limit = 100; render(); $('#content').scrollTop = 0; return; }
   if (action === 'artist') {
     const name = buttonEl.dataset.name;
@@ -510,6 +535,9 @@ document.addEventListener('submit', event => {
     }).catch(errorMessage);
   }
   if (event.target.id === 'web-account-form') {
+    if (state.accountPending) return;
+    state.accountPending = true;
+    event.target.querySelector('button[type="submit"]').disabled = true;
     fetch(state.accountMode === 'register' ? '/web/register' : '/web/login', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({username: $('#web-username').value, password: $('#web-password').value}),
@@ -517,8 +545,41 @@ document.addEventListener('submit', event => {
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not sign in');
       state.webAuthenticated = true; state.notice = '';
+      state.username = $('#web-username').value.trim();
+      state.recoveryCode = result.recoveryCode || null;
       await refreshStatus(true);
-    }).catch(errorMessage);
+      renderModal();
+    }).catch(errorMessage).finally(() => {
+      state.accountPending = false;
+      const submit = $('#web-account-form button[type="submit"]'); if (submit) submit.disabled = false;
+    });
+  }
+  if (['web-recover-form', 'change-password-form', 'replace-recovery-form'].includes(event.target.id)) {
+    if (state.accountPending) return;
+    state.accountPending = true;
+    const form = event.target;
+    const submit = form.querySelector('button[type="submit"]'); submit.disabled = true;
+    const recovery = form.id === 'web-recover-form';
+    const change = form.id === 'change-password-form';
+    const path = recovery ? '/web/recover' : change ? '/web/password' : '/web/recovery-code';
+    const values = recovery ? {username: $('#recover-username').value, recoveryCode: $('#recover-code').value,
+      newPassword: $('#recover-password').value} : Object.fromEntries(new FormData(form));
+    api(path, values).then(result => {
+      form.reset();
+      if (recovery) { clearWebSession(); state.accountMode = 'login'; }
+      state.modal = null;
+      state.recoveryCode = result.recoveryCode || null;
+      state.notice = recovery ? 'Password reset. Save the replacement code, then sign in.' : change ?
+        'Password changed. Other web sessions have been signed out.' : '';
+      render();
+    }).catch(error => {
+      if (error.status === 401 && !recovery) { clearWebSession(); render(); }
+      errorMessage(error);
+      const hint = $('#account-error'); if (hint) hint.textContent = error.message;
+    }).finally(() => { state.accountPending = false; submit.disabled = false; });
+  }
+  if (event.target.id === 'recovery-saved-form') {
+    state.recoveryCode = null; renderModal();
   }
   if (event.target.id === 'modal-playlist-form') {
     createPlaylist($('#modal-playlist-name').value);
@@ -551,6 +612,7 @@ async function start() {
       const details = await session.json();
       state.multiuser = Boolean(details.multiuser);
       state.registrationOpen = Boolean(details.registrationOpen);
+      state.username = details.username || '';
       state.webAuthenticated = Boolean(details.authenticated);
       if (state.webAuthenticated) await refreshStatus(true); else render();
     } else {
